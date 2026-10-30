@@ -104,6 +104,7 @@ class ProgressReporter:
     """Throttled progress rendering to a single Telegram message."""
 
     MIN_INTERVAL = 1.2
+    HEARTBEAT_SECONDS = 8.0
 
     def __init__(
         self,
@@ -138,11 +139,17 @@ class ProgressReporter:
         async with self._lock:
             now = time.monotonic()
             percent = max(0, min(100, int(percent)))
-            changed_enough = percent - self._last_percent >= 5 or percent in (0, 100)
-            if not force and not changed_enough:
-                return
-            if not force and screenshot == "" and (now - self._last_sent) < self.MIN_INTERVAL:
-                return
+            moved = percent - self._last_percent >= 5 or percent in (0, 100)
+            elapsed = now - self._last_sent
+
+            # Send when: forced, carrying a screenshot, a meaningful jump that
+            # also respects the rate limit, or a heartbeat so long tasks do not
+            # look frozen.
+            if not force and not screenshot:
+                if not moved and elapsed < self.HEARTBEAT_SECONDS:
+                    return
+                if moved and elapsed < self.MIN_INTERVAL:
+                    return
 
             self._last_percent = percent
             self._last_sent = now
