@@ -1,0 +1,42 @@
+# secrets & env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+token.json
+
+# runtime data
+data/
+outputs/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# node / web artifacts
+node_modules/
+.next/
+dist-web/
+
+# media scratch
+*.tmp
+media_cache/
+recordings/
+.agent_tmp/
