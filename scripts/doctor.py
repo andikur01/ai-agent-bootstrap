@@ -53,13 +53,19 @@ def check_secret_shapes(settings) -> None:
         if not match:
             line("Token Telegram", MISS, "format bukan <angka>:<rahasia>")
         else:
+            # Telegram tokens are exactly <digits>:<35 chars>; a different length
+            # means the paste dropped or added a character.
             line("Token Telegram", OK if len(token) == 46 else MISS, _secret_shape("token", token, 46))
+    # Key lengths vary between providers/versions, so a mismatch is a hint to
+    # re-check the paste, not proof of a bad key. The live API call is the
+    # authority on whether a key actually works.
     for provider, value, expected in (
         ("Groq", settings.groq_api_key, 56),
         ("Gemini", settings.gemini_api_key, 39),
     ):
         if value:
-            line(f"Key {provider}", OK if len(value) == expected else MISS, _secret_shape(provider, value, expected))
+            ok = len(value) == expected and value.isascii()
+            line(f"Key {provider}", OK if ok else WARN, _secret_shape(provider, value, expected))
 
 
 
@@ -173,7 +179,13 @@ async def _runtime_checks(settings) -> int:
             if data.get("ok"):
                 line("Telegram getMe", OK, "@" + data["result"].get("username", ""))
             else:
-                line("Telegram getMe", MISS, data.get("description", "")[:80])
+                code = data.get("error_code")
+                hint = data.get("description", "")[:80]
+                if code == 401:
+                    hint += " -> token tidak dikenali Telegram; ambil ulang dari @BotFather"
+                elif code == 404:
+                    hint += " -> format token rusak"
+                line("Telegram getMe", MISS, hint)
                 failures += 1
         except Exception as exc:  # noqa: BLE001
             line("Telegram getMe", MISS, str(exc)[:80])
