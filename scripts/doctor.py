@@ -25,6 +25,44 @@ def line(label: str, status: str, detail: str = "") -> None:
     print(f"{status} {label:<28} {detail}")
 
 
+def _secret_shape(name: str, value: str, expected: int) -> str:
+    """Report a secret's *shape* without revealing it.
+
+    A copy-paste that drops or adds one character is the most common cause of a
+    401, and it is invisible in a normal check that only asks "is it set?".
+    """
+    if not value:
+        return "kosong"
+    notes = []
+    if len(value) != expected:
+        notes.append(f"panjang {len(value)} (harusnya {expected}) -> kemungkinan salah copy")
+    if any(c.isspace() for c in value):
+        notes.append("ada spasi")
+    if any(ord(c) > 127 for c in value):
+        notes.append("ada karakter aneh")
+    return "; ".join(notes) if notes else f"panjang OK ({expected})"
+
+
+def check_secret_shapes(settings) -> None:
+    import re
+
+    print("\n=== Bentuk secret (tidak menampilkan isi) ===\n")
+    token = settings.telegram_bot_token
+    if token:
+        match = re.fullmatch(r"(\d{8,12}):([A-Za-z0-9_-]+)", token)
+        if not match:
+            line("Token Telegram", MISS, "format bukan <angka>:<rahasia>")
+        else:
+            line("Token Telegram", OK if len(token) == 46 else MISS, _secret_shape("token", token, 46))
+    for provider, value, expected in (
+        ("Groq", settings.groq_api_key, 56),
+        ("Gemini", settings.gemini_api_key, 39),
+    ):
+        if value:
+            line(f"Key {provider}", OK if len(value) == expected else MISS, _secret_shape(provider, value, expected))
+
+
+
 def main() -> int:
     from app.core.config import get_settings
 
@@ -36,6 +74,8 @@ def main() -> int:
     allowed = settings.telegram_allowed_user_ids
     line("Allow-list user", OK if allowed else MISS,
          f"{len(allowed)} user" if allowed else "isi TELEGRAM_ALLOWED_USER_IDS (wajib)")
+
+    check_secret_shapes(settings)
 
     providers = settings.available_providers()
     line("LLM provider", OK if providers else MISS,
