@@ -135,7 +135,74 @@ class ImageService:
         if self.settings.hf_token:
             providers.append(("huggingface-flux", self._generate_hf))
         providers.append(("pollinations", self._generate_pollinations))
+        # Last resort: a designed local render, so the user always gets an image
+        # even when every network provider is down or rate limited.
+        providers.append(("local-render", self._generate_local))
         return providers
+
+    async def _generate_local(self, prompt: str, path: Path, size: str, negative: str) -> None:
+        """Deterministic offline image built from the prompt.
+
+        Not a diffusion model - a composed gradient poster with the subject text.
+        It exists so "buatkan gambar" degrades to something usable instead of an
+        error when the network providers are unavailable.
+        """
+        import asyncio as _asyncio
+
+        from PIL import Image, ImageDraw, ImageFilter
+
+        width, height = _parse_size(size)
+
+        def _render() -> None:
+            seed = _stable_seed(prompt)
+            top = ((seed * 37) % 200 + 20, (seed * 53) % 160 + 40, (seed * 71) % 200 + 40)
+            bottom = ((seed * 91) % 200 + 20, (seed * 17) % 160 + 30, (seed * 29) % 200 + 50)
+            image = Image.new("RGB", (width, height))
+            draw = ImageDraw.Draw(image)
+            for y in range(height):
+                ratio = y / max(1, height - 1)
+                draw.line(
+                    [(0, y), (width, y)],
+                    fill=tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3)),
+                )
+
+            # soft blobs for visual interest
+            blobs = Image.new("RGB", (width, height), (0, 0, 0))
+            blob_draw = ImageDraw.Draw(blobs)
+            for index in range(5):
+                cx = (seed * (index + 3) * 13) % width
+                cy = (seed * (index + 7) * 17) % height
+                radius = (width // 6) + (index * 11) % (width // 8)
+                tone = (
+                    (seed * (index + 2) * 31) % 200 + 30,
+                    (seed * (index + 5) * 41) % 200 + 30,
+                    (seed * (index + 9) * 23) % 200 + 30,
+                )
+                blob_draw.ellipse(
+                    [cx - radius, cy - radius, cx + radius, cy + radius], fill=tone
+                )
+            blobs = blobs.filter(ImageFilter.GaussianBlur(radius=width // 12))
+            image = Image.blend(image, blobs, 0.55)
+
+            overlay = ImageDraw.Draw(image)
+            font = _load_font(max(20, width // 22))
+            title = prompt.strip()[:60]
+            wrapped = _wrap_text(title, 26)
+            text_y = height // 2 - (len(wrapped) * (width // 18)) // 2
+            for line in wrapped[:3]:
+                bbox = overlay.textbbox((0, 0), line, font=font)
+                overlay.text(
+                    ((width - (bbox[2] - bbox[0])) // 2, text_y),
+                    line,
+                    font=font,
+                    fill=(248, 250, 252),
+                    stroke_width=2,
+                    stroke_fill=(15, 23, 42),
+                )
+                text_y += width // 16
+            image.save(path)
+
+        await _asyncio.to_thread(_render)
 
     async def _generate_hf(self, prompt: str, path: Path, size: str, negative: str) -> None:
         if not self.settings.hf_token:
@@ -175,13 +242,28 @@ class ImageService:
             }
         )
         url = f"{self.settings.pollinations_base_url}/{urllib.parse.quote(prompt)}?{query}"
+
+        # Pollinations returns 5xx under load; a couple of spaced retries turn a
+        # transient 503 into a success instead of falling through to the local
+        # render.
+        last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            if "image" not in content_type:
-                raise ToolError(f"Pollinations tidak mengembalikan gambar ({content_type})")
-            path.write_bytes(response.content)
+            for attempt in range(3):
+                try:
+                    response = await client.get(url)
+                    if response.status_code in (429, 500, 502, 503, 504):
+                        raise ToolError(f"Pollinations sibuk ({response.status_code})")
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "")
+                    if "image" not in content_type:
+                        raise ToolError(f"Pollinations tidak mengembalikan gambar ({content_type})")
+                    path.write_bytes(response.content)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    if attempt < 2:
+                        await asyncio.sleep(2.5 * (attempt + 1))
+            raise ToolError(f"Pollinations gagal setelah 3 percobaan: {last_error}")
 
     # ---------------------------------------------------------------- edit
     async def edit(
@@ -354,3 +436,36 @@ def _stable_seed(text: str) -> int:
     import hashlib
 
     return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) % 1_000_000
+
+
+def _load_font(size: int):
+    """Best available TrueType font, falling back to Pillow's bitmap default."""
+    from PIL import ImageFont
+
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_text(text: str, width: int) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= width:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text[:width]]

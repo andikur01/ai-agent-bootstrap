@@ -102,6 +102,33 @@ def playwright_available() -> bool:
         return False
 
 
+def browser_installed() -> bool:
+    """True when the chromium binary is actually present, not just the package.
+
+    ``playwright`` can be pip-installed while ``playwright install`` was never
+    run, which is a common CI trap: the import succeeds but every launch fails.
+    """
+    import os
+    from pathlib import Path
+
+    roots = []
+    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if override and override not in {"0", ""}:
+        roots.append(Path(override))
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+    for root in roots:
+        try:
+            if root.exists() and any(root.glob("chromium-*")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def browser_ready() -> bool:
+    return playwright_available() and browser_installed()
+
+
 class BrowserQA:
     def __init__(self, outputs_dir: Path, *, timeout_ms: int = 25000):
         self.outputs = Path(outputs_dir)

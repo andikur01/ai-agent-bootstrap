@@ -25,9 +25,36 @@ from app.core.progress import ConfirmationGate, ProgressReporter, parse_decision
         ("belajar tentang kubernetes", Intent.LEARN),
         ("ingatkan saya besok jam 9", Intent.REMINDER),
         ("https://youtu.be/abc123 jelaskan isinya", Intent.LINK_INGEST),
+        ("lanjutkan yang tadi", Intent.CONTINUE),
+        ("lanjut yang kemarin", Intent.CONTINUE),
+        ("teruskan", Intent.CONTINUE),
     ],
 )
 def test_rule_routing(text, expected):
+    route = classify_rules(text)
+    assert route is not None, text
+    assert route.intent == expected, f"{text} -> {route.intent}"
+
+
+def test_continuation_with_new_instruction_is_not_continue():
+    # "perbaiki gambarnya jadi gelap" carries an instruction, so it must be an
+    # edit, not a bare pointer at previous work.
+    route = classify_rules("edit gambar yang tadi jadi lebih terang")
+    assert route.intent == Intent.IMAGE_EDIT
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("edit gambarnya jadi gelap", Intent.IMAGE_EDIT),
+        ("ubah fotonya jadi hitam putih", Intent.IMAGE_EDIT),
+        ("perbaiki videonya jadi lambat", Intent.VIDEO_EDIT),
+        ("ubah suaranya lebih cepat", Intent.AUDIO_EDIT),
+        ("perbaiki websitenya", Intent.WEB_REPAIR),
+    ],
+)
+def test_indonesian_suffixes_still_route_to_edits(text, expected):
+    # "gambarnya" / "videonya" must not slip through the word-boundary rule.
     route = classify_rules(text)
     assert route is not None, text
     assert route.intent == expected, f"{text} -> {route.intent}"

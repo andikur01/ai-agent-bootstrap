@@ -31,6 +31,7 @@ YT_RE = re.compile(
 class Intent(str, Enum):
     CHAT = "chat"
     THINK = "think"
+    CONTINUE = "continue"
     IMAGE_CREATE = "image_create"
     IMAGE_EDIT = "image_edit"
     VIDEO_CREATE = "video_create"
@@ -138,7 +139,7 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
     (
         re.compile(
             r"\b(edit|ubah|perbaiki|ganti|modif|tambah(kan)?)\b.{0,40}"
-            r"\b(gambar|foto|image|logo|poster)\b",
+            r"\b(gambar|foto|image|logo|poster)\w*",
             re.I,
         ),
         Intent.IMAGE_EDIT,
@@ -154,7 +155,7 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
         {},
     ),
     (
-        re.compile(r"\b(edit|potong|gabung|subtitle|speed|perbaiki)\b.{0,40}\b(video|klip)\b", re.I),
+        re.compile(r"\b(edit|potong|gabung|subtitle|speed|perbaiki)\b.{0,40}\b(video|klip)\w*", re.I),
         Intent.VIDEO_EDIT,
         {},
     ),
@@ -168,7 +169,7 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
         {},
     ),
     (
-        re.compile(r"\b(edit|potong|gabung|perbaiki|ubah)\b.{0,40}\b(suara|audio|voice)\b", re.I),
+        re.compile(r"\b(edit|potong|gabung|perbaiki|ubah)\b.{0,40}\b(suara|audio|voice)\w*", re.I),
         Intent.AUDIO_EDIT,
         {},
     ),
@@ -191,7 +192,7 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
         {},
     ),
     (
-        re.compile(r"\b(perbaiki|repair|debug|fix)\b.{0,30}\b(web|website|situs|deploy)\b", re.I),
+        re.compile(r"\b(perbaiki|repair|debug|fix)\b.{0,30}\b(web|website|situs|deploy)\w*", re.I),
         Intent.WEB_REPAIR,
         {},
     ),
@@ -212,8 +213,26 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
 ]
 
 
+def _bare_continuation(text: str) -> bool:
+    """True for a pointer with no new instruction of its own.
+
+    "lanjutkan yang tadi" / "yang kemarin" mean "do the next step of that work".
+    "perbaiki gambarnya jadi gelap" carries an instruction, so it is an edit, not
+    a bare continuation. Length and an instruction verb both disqualify it.
+    """
+    lowered = text.lower().strip()
+    if len(lowered) > 60:
+        return False
+    if re.search(r"\b(jadi|jadiin|dengan|pakai|supaya|biar|menjadi)\b", lowered):
+        return False
+    return bool(re.search(r"\b(lanjut(kan)?|teruskan|continue|yang\s+tadi|yg\s+tadi|tadi)\b", lowered))
+
+
 def classify_rules(text: str, *, has_photo: bool = False, has_voice: bool = False) -> Route | None:
     stripped = text.strip()
+
+    if _bare_continuation(stripped):
+        return Route(Intent.CONTINUE, {"text": stripped}, confidence=0.9)
 
     urls = URL_RE.findall(stripped)
     if urls and (YT_RE.search(stripped) or len(stripped) < 300):
@@ -256,6 +275,7 @@ def _strip_urls(text: str) -> str:
 CLASSIFIER_LABELS = [
     "chat",
     "think",
+    "continue",
     "image_create",
     "image_edit",
     "video_create",
@@ -277,6 +297,7 @@ CLASSIFIER_PROMPT = """Klasifikasikan pesan user ke SATU label.
 Label:
 - chat: ngobrol, tanya jawab, minta pendapat, brainstorming ringan
 - think: minta analisis mendalam / reasoning bertahap
+- continue: merujuk pekerjaan sebelumnya tanpa instruksi baru ("lanjutkan yang tadi", "yang kemarin")
 - image_create: minta dibuatkan gambar/logo/poster
 - image_edit: minta gambar yang SUDAH ADA diubah/diperbaiki
 - video_create: minta dibuatkan video/animasi baru

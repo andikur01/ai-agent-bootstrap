@@ -40,3 +40,10 @@ dist-web/
 media_cache/
 recordings/
 .agent_tmp/
+
+# extra secret-bearing files
+cookies.txt
+*_cookies.txt
+youtube_token.json
+client_secret*.json
+*.sqlite3-journal

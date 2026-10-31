@@ -1,0 +1,58 @@
+name: ai-agent-bootstrap
+
+services:
+  bot:
+    build: .
+    image: ai-agent-bootstrap:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Talk to the other services by name on the compose network.
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      N8N_BASE_URL: http://n8n:5678
+      OUTPUTS_DIR: /app/outputs
+      DATA_DIR: /app/data
+      MEMORY_DIR: /app/data/memory
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    depends_on:
+      chroma:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  chroma:
+    image: chromadb/chroma:1.0.0
+    restart: unless-stopped
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      # bound to localhost only: the vector store is not meant to be public
+      - "127.0.0.1:8001:8000"
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      GENERIC_TIMEZONE: ${TZ:-Asia/Jakarta}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-in-env}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    ports:
+      # keep the n8n editor off the public internet; reach it via SSH tunnel
+      - "127.0.0.1:5678:5678"
+
+volumes:
+  chroma-data:
+  n8n-data:

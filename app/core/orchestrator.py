@@ -220,6 +220,77 @@ class Orchestrator:
             raise AgentError("Ada error tak terduga saat menjalankan tugas ini.") from exc
         return outcome
 
+    # ------------------------------------------------------------- continue
+    async def _do_continue(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
+        """Resolve "lanjutkan yang tadi" to the real last artifact and act on it."""
+        text = str(route.args.get("text") or "")
+        reference = await self.memory.resolve_reference(user_id, text)
+        artifact = reference.artifact
+
+        if artifact is None:
+            recent = await self.memory.recent_artifacts(user_id, limit=3)
+            if not recent:
+                return Outcome(
+                    text="Aku belum punya pekerjaan sebelumnya. Mau mulai dari mana?"
+                )
+            artifact = recent[0]
+
+        kind = artifact.kind
+        title = artifact.title or artifact.location
+        header = f"Melanjutkan *{title}* ({kind})."
+
+        if kind == KIND_IMAGE:
+            source = Path(artifact.location)
+            if source.exists():
+                result = await self.images.edit(
+                    "perbaiki dan tingkatkan kualitas gambar ini", source=source, progress=progress
+                )
+                await self.memory.register_artifact(
+                    user_id,
+                    KIND_IMAGE,
+                    title=f"lanjutan: {title[:60]}",
+                    location=str(result.path),
+                    meta={"from": str(source)},
+                )
+                return Outcome(
+                    text=f"{header}\nAku perbaiki gambarnya jadi versi lebih rapi.",
+                    photos=[str(result.path)],
+                    tokens=100,
+                )
+
+        if kind in (KIND_WEB, KIND_WEB_APP):
+            return await self._do_web_repair(user_id, route, progress=progress, **kwargs)
+
+        if kind in (KIND_VIDEO, KIND_AUDIO):
+            return Outcome(
+                text=(
+                    f"{header}\n"
+                    f"File terakhir: {artifact.location}\n"
+                    "Mau aku edit bagaimana? Contoh: 'potong jadi 10 detik' atau 'tambah subtitle'."
+                )
+            )
+
+        if kind == KIND_N8N:
+            return Outcome(text=f"{header}\nWorkflow terakhir ada di {artifact.location}.")
+
+        if kind in (KIND_RESEARCH, KIND_LINK):
+            question = f"Lanjutkan pembahasan: {title}"
+            bundle = await self.memory.build_context(
+                user_id, question, persona=PERSONA, recent_turns=4
+            )
+            result = await self.gateway.complete(
+                bundle.messages, tier="small", user_id=user_id, max_tokens=700
+            )
+            return Outcome(text=f"{header}\n\n{result.text.strip()}", tokens=result.total_tokens)
+
+        return Outcome(
+            text=(
+                f"{header}\n"
+                f"Lokasi: {artifact.location}\n"
+                "Bilang bagian mana yang mau dilanjutkan."
+            )
+        )
+
     # ------------------------------------------------------------------ chat
     async def _do_chat(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
         text = str(route.args.get("text") or "")

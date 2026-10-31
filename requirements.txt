@@ -1,0 +1,41 @@
+# Core
+python-telegram-bot[rate-limiter]==22.8
+pydantic==2.14.2
+pydantic-settings==2.16.2
+python-dotenv==1.2.4
+httpx==0.28.1
+tenacity==9.2.1
+aiofiles==25.1.0
+
+# LLM gateway + token accounting
+litellm==1.106.6
+tiktoken==0.14.0
+
+# Memory
+chromadb==1.5.9
+
+# Media
+pillow==13.0.0
+numpy==2.5.4
+edge-tts==7.3.1
+pydub==0.25.1
+yt-dlp==2026.10.26
+manim==0.22.1
+
+# Search (keyless fallback)
+ddgs==9.16.1
+
+# Web QA
+playwright==1.64.1
+
+# Scheduler
+APScheduler==3.11.3
+
+# Optional but recommended: local embeddings (no API needed) and local STT.
+# Install these on the deployment host; the app degrades gracefully without them.
+# sentence-transformers==5.1.2
+# faster-whisper==1.2.1
+
+# Dev / test
+pytest==9.2.0
+pytest-asyncio==1.4.1

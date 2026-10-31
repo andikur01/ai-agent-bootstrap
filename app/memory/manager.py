@@ -93,6 +93,9 @@ class MemoryManager:
     async def latest_artifact(self, user_id: int, kind: str | None = None) -> Artifact | None:
         return await self.registry.latest(user_id, kind)
 
+    async def recent_artifacts(self, user_id: int, limit: int = 5) -> list[Artifact]:
+        return await self.registry.list(user_id, limit=limit)
+
     # ------------------------------------------------------------------ context
     async def build_context(
         self,
