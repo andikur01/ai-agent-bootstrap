@@ -10,6 +10,9 @@ tanpa API key (gratis).
 | Fitur | Cara pakai | Butuh | Bukti uji |
 |---|---|---|---|
 | Sambung & mulai bot | `/start`, `/help`, `/bantu` | Token Telegram | Dijalankan end-to-end lawan server Telegram lokal: balasan terkirim |
+| Menu semua fitur | `/menu` | - | Teks + tombol inline per kategori; klik tombol mengedit pesan di tempat |
+| Status bot & model | `/status`, `/status_model` | - | Menampilkan provider, model aktif, tier kecil/besar |
+| Command alias fitur | `/buat_gambar`, `/buat_web`, `/ingat`, dst | - | 12 alias diuji: masing-masing memetakan ke intent yang benar |
 | Statistik memori & token | `/memori` | - | Balasan nyata: "Pesan tersimpan: 4, Token hari ini 0/200.000" |
 | Router intent (bahasa Indonesia) | otomatis | - | 13 contoh perintah dirutekan benar tanpa LLM |
 | Buat gambar | "buatkan gambar ..." | - | Pollinations gratis; kalau rate-limit (402) jatuh ke render lokal, tetap dapat PNG 1024x1024 |

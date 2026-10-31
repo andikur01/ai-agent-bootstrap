@@ -43,11 +43,42 @@ class Application:
         await self.scheduler.start()
         if self.telegram_app is not None:
             await self.telegram_app.initialize()
+            await self._publish_commands()
             await self.telegram_app.start()
             await self.telegram_app.updater.start_polling(
                 drop_pending_updates=True, allowed_updates=["message", "callback_query"]
             )
         log.info("application started")
+
+    async def _publish_commands(self) -> None:
+        """Register the command list so Telegram shows its native menu button."""
+        from telegram import BotCommand
+
+        commands = [
+            BotCommand("menu", "Menu semua fitur"),
+            BotCommand("status", "Status bot & API"),
+            BotCommand("status_model", "Model AI yang aktif"),
+            BotCommand("pikir", "Analisis mendalam"),
+            BotCommand("belajar", "Cari & simpan pengetahuan"),
+            BotCommand("memori", "Statistik memori & token"),
+            BotCommand("buat_gambar", "Generate gambar"),
+            BotCommand("edit_gambar", "Edit gambar terakhir"),
+            BotCommand("buat_video", "Buat video"),
+            BotCommand("edit_video", "Edit video terakhir"),
+            BotCommand("text_to_voice", "Teks jadi suara"),
+            BotCommand("buat_web", "Buat website static"),
+            BotCommand("buat_web_full", "Buat website fullstack"),
+            BotCommand("perbaiki_web", "Perbaiki website"),
+            BotCommand("buat_n8n", "Buat workflow n8n"),
+            BotCommand("ingat", "Set reminder"),
+            BotCommand("jadwal", "Lihat jadwal"),
+            BotCommand("baca_link", "Baca & rangkum link"),
+            BotCommand("help", "Bantuan lengkap"),
+        ]
+        try:
+            await self.telegram_app.bot.set_my_commands(commands)
+        except Exception as exc:  # noqa: BLE001 - cosmetic, must never block startup
+            log.warning("set_my_commands failed: %s", exc)
 
     async def stop(self) -> None:
         await self.scheduler.shutdown()
@@ -145,9 +176,18 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
         app = app.base_url(settings.telegram_api_base)
     app = app.build()
 
+    # Group -1: the authorisation gate must run before anything else.
+    app.add_handler(
+        MessageHandler(filters.ALL, bot.on_guard), group=-1
+    )
+    app.add_handler(CallbackQueryHandler(bot.on_guard), group=-1)
+
     app.add_handler(CommandHandler("start", bot.cmd_start))
     app.add_handler(CommandHandler("help", bot.cmd_help))
     app.add_handler(CommandHandler("bantu", bot.cmd_help))
+    app.add_handler(CommandHandler("menu", bot.cmd_menu))
+    app.add_handler(CommandHandler("status", bot.cmd_status))
+    app.add_handler(CommandHandler("status_model", bot.cmd_status_model))
     app.add_handler(CommandHandler("belajar", bot.cmd_belajar))
     app.add_handler(CommandHandler("pikir", bot.cmd_pikir))
     app.add_handler(CommandHandler("memori", bot.cmd_memori))
@@ -156,7 +196,20 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("jadwal", bot.cmd_jadwal))
     app.add_handler(CommandHandler("bataljadwal", bot.cmd_bataljadwal))
     app.add_handler(CommandHandler("admin", bot.cmd_admin))
-    app.add_handler(CallbackQueryHandler(bot.on_callback, pattern=r"^confirm:"))
+    # Feature aliases, so the menu buttons have real commands behind them.
+    app.add_handler(CommandHandler("buat_gambar", bot.cmd_buat_gambar))
+    app.add_handler(CommandHandler("edit_gambar", bot.cmd_edit_gambar))
+    app.add_handler(CommandHandler("buat_video", bot.cmd_buat_video))
+    app.add_handler(CommandHandler("edit_video", bot.cmd_edit_video))
+    app.add_handler(CommandHandler("buat_web", bot.cmd_buat_web))
+    app.add_handler(CommandHandler("buat_web_full", bot.cmd_buat_web_full))
+    app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
+    app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
+    app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
+    app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))
+    app.add_handler(CommandHandler("voice_to_text", bot.cmd_voice_to_text))
+    app.add_handler(CommandHandler("text_to_voice", bot.cmd_text_to_voice))
+    app.add_handler(CallbackQueryHandler(bot.on_callback, pattern=r"^(confirm|menu):"))
     app.add_handler(
         MessageHandler(
             filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL,

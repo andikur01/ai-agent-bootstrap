@@ -16,7 +16,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.ext import ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 from app.bot.presenter import (
     TypingIndicator,
@@ -43,6 +43,99 @@ log = get_logger(__name__)
 
 YES_CALLBACK = "confirm:yes"
 NO_CALLBACK = "confirm:no"
+MENU_PREFIX = "menu:"
+
+# Section id -> (button label, body). Kept as plain data so the content can be
+# tested without a Telegram connection.
+MENU_SECTIONS: dict[str, tuple[str, str]] = {
+    "chat": (
+        "💬 Chat & Thinking",
+        "💬 *CHAT & THINKING*\n\n"
+        "/pikir <topik> - Analisis mendalam 5 langkah\n"
+        "/belajar <topik> - Cari di internet, rangkum, simpan permanen\n"
+        "/memori - Statistik memori & token terpakai\n"
+        "/feedback <pesan> - Catat saranmu",
+    ),
+    "creative": (
+        "🎨 Creative",
+        "🎨 *CREATIVE*\n\n"
+        "/buat_gambar <deskripsi> - Generate gambar AI\n"
+        "/edit_gambar <deskripsi> - Edit gambar terakhir\n"
+        "/buat_video <deskripsi> - Buat video animasi\n"
+        "/edit_video <deskripsi> - Edit video terakhir\n"
+        "/text_to_voice <teks> - Teks jadi suara\n"
+        "/voice_to_text - Voice note jadi teks",
+    ),
+    "web": (
+        "🌐 Web",
+        "🌐 *WEB DEVELOPMENT*\n\n"
+        "/buat_web <deskripsi> - Website static (dites dulu, lalu dikirim)\n"
+        "/buat_web_full <deskripsi> - Website fullstack + login + database\n"
+        "/perbaiki_web <link> - Perbaiki website yang error",
+    ),
+    "automation": (
+        "⚙️ Automation",
+        "⚙️ *AUTOMATION*\n\n"
+        "/buat_n8n <deskripsi> - Buat workflow n8n\n"
+        "/ingat <waktu> <pesan> - Set reminder\n"
+        "/jadwal - Lihat semua jadwal\n"
+        "/bataljadwal <id> - Batalkan satu jadwal",
+    ),
+    "link": (
+        "🔗 Link & Media",
+        "🔗 *LINK & MEDIA*\n\n"
+        "/baca_link <url> - Baca & rangkum isi link\n"
+        "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
+        "Kirim voice note - Langsung ditranskrip\n"
+        "Kirim foto - Bisa langsung diedit",
+    ),
+    "system": (
+        "📊 System",
+        "📊 *SYSTEM*\n\n"
+        "/status - Status bot & provider API\n"
+        "/status_model - Model AI yang aktif\n"
+        "/menu - Tampilkan menu ini\n"
+        "/help - Bantuan lengkap\n"
+        "/batal - Batalkan konfirmasi",
+    ),
+}
+
+MENU_TEXT = (
+    "🤖 *AI Agent Menu*\n\n"
+    "Klik tombol di bawah untuk lihat per kategori, atau langsung ketik\n"
+    "perintahnya. Aku juga paham bahasa biasa - cukup bilang\n"
+    "\"buatkan gambar kucing\", nggak wajib pakai perintah.\n\n"
+    + "\n\n".join(body for _, body in MENU_SECTIONS.values())
+    + "\n\n📊 /status - cek bot & API\n"
+    "❓ /help - bantuan lengkap"
+)
+
+
+def menu_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(label, callback_data=f"{MENU_PREFIX}{key}")
+        for key, (label, _) in MENU_SECTIONS.items()
+    ]
+    rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("❓ Bantuan lengkap", callback_data=f"{MENU_PREFIX}help")])
+    return InlineKeyboardMarkup(rows)
+
+
+def menu_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Text + keyboard for one menu section, with a back button."""
+    if section == "help":
+        return HELP_TEXT, menu_keyboard()
+    entry = MENU_SECTIONS.get(section)
+    body = entry[1] if entry else MENU_TEXT
+    back = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Kembali ke menu", callback_data=f"{MENU_PREFIX}home")]]
+    )
+    return body, back
+
+
+def _args_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return " ".join(context.args) if context.args else ""
+
 
 
 class RateLimiter:
@@ -87,6 +180,33 @@ class TelegramBot:
         return bool(admins) and user_id in admins
 
     # ------------------------------------------------------------------ entry
+    async def on_guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Authorise before any other handler runs.
+
+        Command handlers and callbacks do not pass through ``on_message``, so
+        without this a stranger could drive /jadwal, /admin and every feature
+        command. Runs in group -1 and stops propagation for unauthorised users.
+        """
+        user = update.effective_user
+        if user is None:
+            return
+        message = update.effective_message
+        text = (getattr(message, "text", "") or "").strip().lower()
+        # /start is the onboarding path: it reports the caller's user id so they
+        # can be added to the allow-list. cmd_start authorises on its own.
+        if text.startswith("/start"):
+            return
+        try:
+            self._authorise(user.id)
+        except UnauthorizedUserError as exc:
+            target = message
+            if target is not None:
+                await target.reply_text(exc.user_message)
+            elif update.callback_query is not None:
+                await update.callback_query.answer("Tidak diizinkan.", show_alert=False)
+            log.warning("unauthorised access attempt user=%s", user.id)
+            raise ApplicationHandlerStop from None
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         user = update.effective_user
@@ -230,6 +350,17 @@ class TelegramBot:
             await query.answer("Tidak diizinkan.")
             return
 
+        # Menu buttons are navigation, not task confirmation - handle and return.
+        if (query.data or "").startswith(MENU_PREFIX):
+            section = query.data[len(MENU_PREFIX) :]
+            body, keyboard = menu_section(section)
+            await query.answer()
+            try:
+                await query.edit_message_text(redact(body), parse_mode="Markdown", reply_markup=keyboard)
+            except Exception:  # noqa: BLE001 - unchanged content / markdown edge cases
+                await query.edit_message_text(redact(body), reply_markup=keyboard)
+            return
+
         user_id = query.from_user.id
         pending = self.gate.get(user_id)
         approved = query.data == YES_CALLBACK
@@ -345,6 +476,80 @@ class TelegramBot:
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_text(update.effective_message, HELP_TEXT)
+
+    async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_text(update.effective_message, MENU_TEXT, reply_markup=menu_keyboard())
+
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        providers = self.settings.available_providers()
+        if not providers:
+            providers = ["tidak ada (isi minimal 1 API key LLM)"]
+        lines = [
+            "📊 *Status bot*",
+            f"Bot: aktif ✅",
+            f"Provider LLM: {', '.join(providers)}",
+            f"Model aktif: `{self.settings.small_model}` (kecil) / `{self.settings.big_model}` (besar)",
+            f"Vector memory: {'chroma' if self.settings.chroma_host else 'sqlite'}",
+            f"Embedding: `{self.settings.embedding_model}` ({self.settings.embedding_dim}d)",
+            f"Cache semantik: {'aktif' if self.settings.semantic_cache_enabled else 'mati'}",
+            f"Scheduler: {'aktif' if self.scheduler is not None else 'mati'}",
+        ]
+        await send_text(update.effective_message, "\n".join(lines))
+
+    async def cmd_status_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        from app.llm.gateway import TIER_MODELS
+
+        providers = self.settings.available_providers()
+        lines = ["🧠 *Model AI aktif*", f"Urutan fallback: {', '.join(providers) or 'kosong'}"]
+        if not providers:
+            lines.append("\nBelum ada provider siap. Isi GROQ_API_KEY di .env.")
+        for tier in ("small", "big"):
+            lines.append(f"\n*Tier {tier}:*")
+            for provider in providers:
+                model = TIER_MODELS.get(tier, {}).get(provider, "-")
+                lines.append(f"- {provider}: `{model}`")
+        lines.append("\nModel kecil dipakai untuk chat/klasifikasi; model besar untuk tugas berat.")
+        await send_text(update.effective_message, "\n".join(lines))
+
+    async def cmd_ingat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        body = " ".join(context.args) if context.args else ""
+        await self._run_confirmed(update, context, Intent.REMINDER, {"text": body})
+
+    async def cmd_baca_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        body = " ".join(context.args) if context.args else ""
+        await self._run_confirmed(update, context, Intent.LINK_INGEST, {"text": body})
+
+    async def cmd_voice_to_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.STT, {})
+
+    async def cmd_text_to_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        body = " ".join(context.args) if context.args else ""
+        await self._run_confirmed(update, context, Intent.TTS, {"text": body})
+
+    async def cmd_buat_gambar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.IMAGE_CREATE, {"text": _args_text(context)})
+
+    async def cmd_edit_gambar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.IMAGE_EDIT, {"text": _args_text(context)})
+
+    async def cmd_buat_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.VIDEO_CREATE, {"text": _args_text(context)})
+
+    async def cmd_edit_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.VIDEO_EDIT, {"text": _args_text(context)})
+
+    async def cmd_buat_web(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.WEB_STATIC, {"text": _args_text(context)})
+
+    async def cmd_buat_web_full(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.WEB_FULLSTACK, {"text": _args_text(context)})
+
+    async def cmd_perbaiki_web(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.WEB_REPAIR, {"text": _args_text(context)})
+
+    async def cmd_buat_n8n(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.N8N, {"text": _args_text(context)})
+
 
     async def cmd_belajar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         topic = " ".join(context.args) if context.args else ""

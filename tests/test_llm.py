@@ -83,6 +83,36 @@ def test_gateway_candidate_order_follows_config(settings, monkeypatch):
     config_module.get_settings.cache_clear()
 
 
+def test_small_and_big_model_override_is_honoured(settings, monkeypatch):
+    """SMALL_MODEL/BIG_MODEL must actually change the first candidate."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_" + "a" * 30)
+    monkeypatch.setenv("SMALL_MODEL", "groq/llama-3.2-3b-preview")
+    monkeypatch.setenv("BIG_MODEL", "groq/llama-3.3-70b-versatile")
+    from app.core import config as config_module
+
+    config_module.get_settings.cache_clear()
+    fresh = config_module.get_settings()
+    gw = LLMGateway(fresh)
+    assert gw.candidates("small")[0] == ("groq", "groq/llama-3.2-3b-preview")
+    assert gw.candidates("big")[0] == ("groq", "groq/llama-3.3-70b-versatile")
+    config_module.get_settings.cache_clear()
+
+
+def test_model_override_is_ignored_when_its_provider_has_no_key(settings, monkeypatch):
+    """An override for a provider without a key must not break the chain."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_" + "a" * 30)
+    monkeypatch.setenv("SMALL_MODEL", "gemini/gemini-2.0-flash-lite")
+    from app.core import config as config_module
+
+    config_module.get_settings.cache_clear()
+    fresh = config_module.get_settings()
+    gw = LLMGateway(fresh)
+    providers = [p for p, _ in gw.candidates("small")]
+    assert "gemini" not in providers
+    assert providers[0] == "groq"
+    config_module.get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_gateway_falls_back_then_reports(settings, monkeypatch):
     """All providers fail -> ProviderUnavailableError listing every attempt."""

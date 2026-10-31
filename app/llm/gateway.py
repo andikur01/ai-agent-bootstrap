@@ -128,9 +128,20 @@ class LLMGateway:
     def candidates(self, tier: str) -> list[tuple[str, str]]:
         models = TIER_MODELS.get(tier, TIER_MODELS["small"])
         out: list[tuple[str, str]] = []
-        for provider in self.settings.available_providers():
+        available = self.settings.available_providers()
+
+        # A SMALL_MODEL/BIG_MODEL override wins, but only when its provider has a
+        # key configured - otherwise the fallback chain would start with a model
+        # that can never be called.
+        preferred = self.settings.small_model if tier == "small" else self.settings.big_model
+        if preferred and "/" in preferred:
+            provider = preferred.split("/", 1)[0]
+            if provider in available:
+                out.append((provider, preferred))
+
+        for provider in available:
             model = models.get(provider)
-            if model:
+            if model and (provider, model) not in out:
                 out.append((provider, model))
         return out
 
