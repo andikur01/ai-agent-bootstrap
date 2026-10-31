@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Keep tests hermetic: no real .env, no network, deterministic settings.
+os.environ["ENV_FILE"] = str(ROOT / ".env.test-does-not-exist")
 os.environ.setdefault("TELEGRAM_ALLOWED_USER_IDS", "111,222")
 os.environ.setdefault("TELEGRAM_ADMIN_USER_IDS", "111")
 os.environ.setdefault("DAILY_TOKEN_BUDGET", "100000")

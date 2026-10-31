@@ -53,6 +53,23 @@ def main() -> int:
         return asyncio.run(run())
     except KeyboardInterrupt:
         return 130
+    except Exception as exc:  # noqa: BLE001 - top-level UX guard
+        from app.security.redact import redact
+
+        name = type(exc).__name__
+        if name == "InvalidToken":
+            print(
+                "TELEGRAM_BOT_TOKEN ditolak Telegram (401 Unauthorized).\n"
+                "Token salah, sudah di-revoke, atau sudah direset di @BotFather.\n"
+                "Ambil token baru dari BotFather lalu update .env, kemudian jalankan lagi.",
+                file=sys.stderr,
+            )
+            return 3
+        if name in {"MissingSecretError", "ProviderUnavailableError"}:
+            print(redact(f"Konfigurasi belum lengkap: {exc}"), file=sys.stderr)
+            return 3
+        print(redact(f"Gagal start: {name}: {exc}"), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

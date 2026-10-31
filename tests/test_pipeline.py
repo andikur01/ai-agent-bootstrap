@@ -229,3 +229,34 @@ async def test_web_repair_loop_fixes_a_broken_page(tmp_path, settings):
     result = await service.ship(project, project_name=project.title)
     assert len(result.rounds) >= 2, "should have QA'd the broken build first"
     assert result.ok, result.summary()
+
+
+def test_main_returns_clean_message_for_invalid_token(monkeypatch, capsys):
+    """A rejected token must exit with a readable hint, not a raw traceback."""
+    import telegram.error
+
+    from app import main as main_module
+
+    async def boom() -> int:
+        raise telegram.error.InvalidToken("bad token 123456789:FAKE_do_not_use_this_value")
+
+    monkeypatch.setattr(main_module, "run", boom)
+    code = main_module.main()
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "TELEGRAM_BOT_TOKEN ditolak" in err
+    assert "FAKE_do_not_use_this_value" not in err
+
+
+def test_main_returns_clean_message_for_missing_secret(monkeypatch, capsys):
+    from app.core.errors import MissingSecretError
+    from app import main as main_module
+
+    async def boom() -> int:
+        raise MissingSecretError("GROQ_API_KEY", detail="no provider")
+
+    monkeypatch.setattr(main_module, "run", boom)
+    code = main_module.main()
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "Konfigurasi belum lengkap" in err

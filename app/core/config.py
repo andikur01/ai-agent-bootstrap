@@ -11,6 +11,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
+# Tests point this at a non-existent file so a developer's real .env can never
+# leak into a test run (and flip assertions that assume no provider is set).
+ENV_FILE = os.getenv("ENV_FILE", str(ROOT_DIR / ".env"))
+
 
 def _split_csv(value: object) -> list[str]:
     if value is None:
@@ -25,7 +29,7 @@ def _split_csv(value: object) -> list[str]:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(ROOT_DIR / ".env"),
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
