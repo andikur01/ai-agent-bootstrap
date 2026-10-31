@@ -55,3 +55,13 @@ Alur satu pesan: `route -> resolve reference -> confirm (heavy saja) -> execute 
   menunjuk `ENV_FILE` ke file yang tidak ada.
 - Bot fail-closed: token invalid atau allow-list kosong = bot tidak start.
   `main()` sudah memberi pesan singkat (exit 3), bukan traceback mentah.
+- Handler command/callback TIDAK lewat `on_message`, jadi allow-list hanya menjaga
+  teks bebas. Sekarang ada `on_guard` di group -1 (`app/application.py`) yang
+  mengizinkan dulu dan `ApplicationHandlerStop` kalau bukan user. `/start`
+  dikecualikan supaya user baru tetap bisa melihat user id-nya sendiri.
+- `SMALL_MODEL`/`BIG_MODEL` dulu setting mati: gateway selalu pakai tabel tier
+  hardcoded. Sekarang override memimpin tier-nya hanya kalau provider-nya punya
+  key, supaya rantai fallback tidak mulai dari model yang tak bisa dipanggil.
+- `/menu` isinya data (`MENU_SECTIONS`), bukan string raksasa, supaya bisa diuji
+  tanpa koneksi Telegram. `tests/test_menu.py` menguji isi menu, routing tombol,
+  alias command, dan guard.
