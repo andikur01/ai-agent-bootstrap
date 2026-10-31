@@ -232,38 +232,46 @@ class ImageService:
         self, prompt: str, path: Path, size: str, negative: str
     ) -> None:
         width, height = _parse_size(size)
-        query = urllib.parse.urlencode(
-            {
-                "width": width,
-                "height": height,
-                "nologo": "true",
-                "enhance": "true",
-                "seed": _stable_seed(prompt),
-            }
-        )
-        url = f"{self.settings.pollinations_base_url}/{urllib.parse.quote(prompt)}?{query}"
-
-        # Pollinations returns 5xx under load; a couple of spaced retries turn a
-        # transient 503 into a success instead of falling through to the local
-        # render.
+        # The free tier answers 402 (rate limited) and 5xx under load. Retrying
+        # the same request often succeeds, and the cheaper `turbo` model is a
+        # second lane when `flux` keeps getting throttled.
+        variants = [
+            {"model": "flux", "enhance": "true"},
+            {"model": "flux", "enhance": "false"},
+            {"model": "turbo", "enhance": "false"},
+        ]
+        headers = {"Referer": "https://github.com/andikur01/ai-agent-bootstrap"}
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            for attempt in range(3):
-                try:
-                    response = await client.get(url)
-                    if response.status_code in (429, 500, 502, 503, 504):
-                        raise ToolError(f"Pollinations sibuk ({response.status_code})")
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "")
-                    if "image" not in content_type:
-                        raise ToolError(f"Pollinations tidak mengembalikan gambar ({content_type})")
-                    path.write_bytes(response.content)
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    if attempt < 2:
-                        await asyncio.sleep(2.5 * (attempt + 1))
-            raise ToolError(f"Pollinations gagal setelah 3 percobaan: {last_error}")
+            for index, variant in enumerate(variants):
+                query = urllib.parse.urlencode(
+                    {
+                        "width": width,
+                        "height": height,
+                        "nologo": "true",
+                        "seed": _stable_seed(prompt),
+                        **variant,
+                    }
+                )
+                url = f"{self.settings.pollinations_base_url}/{urllib.parse.quote(prompt)}?{query}"
+                for attempt in range(2):
+                    try:
+                        response = await client.get(url, headers=headers)
+                        if response.status_code in (402, 429, 500, 502, 503, 504):
+                            raise ToolError(f"Pollinations sibuk ({response.status_code})")
+                        response.raise_for_status()
+                        content_type = response.headers.get("content-type", "")
+                        if "image" not in content_type:
+                            raise ToolError(f"Pollinations tidak mengembalikan gambar ({content_type})")
+                        path.write_bytes(response.content)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                        if attempt < 1:
+                            await asyncio.sleep(3.0)
+                if index < len(variants) - 1:
+                    await asyncio.sleep(2.0)
+            raise ToolError(f"Pollinations gagal di semua varian: {last_error}")
 
     # ---------------------------------------------------------------- edit
     async def edit(

@@ -37,6 +37,8 @@ class Settings(BaseSettings):
 
     # ---------- Telegram ----------
     telegram_bot_token: str = ""
+    # Point at a local Bot API server (or a test double) instead of api.telegram.org.
+    telegram_api_base: str = ""
     telegram_allowed_user_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     telegram_admin_user_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
 

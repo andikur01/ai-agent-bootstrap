@@ -140,8 +140,10 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
         .token(settings.telegram_bot_token)
         .rate_limiter(AIORateLimiter(max_retries=3))
         .concurrent_updates(True)
-        .build()
     )
+    if settings.telegram_api_base:
+        app = app.base_url(settings.telegram_api_base)
+    app = app.build()
 
     app.add_handler(CommandHandler("start", bot.cmd_start))
     app.add_handler(CommandHandler("help", bot.cmd_help))
