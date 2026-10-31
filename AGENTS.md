@@ -48,3 +48,10 @@ Alur satu pesan: `route -> resolve reference -> confirm (heavy saja) -> execute 
 - `BrowserQA(outputs_dir: Path)` menerima path, bukan objek Settings.
 - Intent CONTINUE jangan sampai jatuh ke `_do_chat`; itu bug lama dan sudah diperbaiki.
 - Pollinations sering 503 saat sibuk; retry + fallback render lokal sudah ada.
+- `pip install python-telegram-bot` polos bikin startup crash di
+  `AIORateLimiter`. Pakai extras: `python-telegram-bot[rate-limiter]`.
+- Test harus hermetik: pydantic `Settings` selalu baca `.env` kalau path-nya
+  default, jadi `.env` asli bisa membalik asumsi test. `tests/conftest.py`
+  menunjuk `ENV_FILE` ke file yang tidak ada.
+- Bot fail-closed: token invalid atau allow-list kosong = bot tidak start.
+  `main()` sudah memberi pesan singkat (exit 3), bukan traceback mentah.
