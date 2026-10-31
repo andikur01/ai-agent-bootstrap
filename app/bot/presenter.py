@@ -132,12 +132,22 @@ async def send_media_group(message, paths: list[str], *, caption: str = "") -> N
 
 
 async def send_screenshots(message, paths: list[str], *, caption: str = "") -> None:
-    """Milestone screenshots for QA evidence."""
+    """Milestone screenshots for QA evidence, with secret regions blurred.
+
+    Screenshots can capture env panels, devtools, or dashboards, so every
+    outbound screenshot goes through the masking guard before it leaves the
+    process. The guard is heuristic (it blurs the header strip), which is why we
+    also never capture secrets in the first place.
+    """
+    from app.core.config import get_settings
+    from app.services.browser_qa import mask_secrets_in_image
+
+    secrets = [v for v in get_settings().secret_values() if len(v) >= 12]
     existing = [p for p in paths if Path(p).exists()][:4]
     for index, path in enumerate(existing):
-        await send_file(
-            message, path, caption=caption if index == 0 else ""
-        )
+        if secrets:
+            path = mask_secrets_in_image(path, secrets)
+        await send_file(message, path, caption=caption if index == 0 else "")
 
 
 async def download_telegram_file(bot, file_id: str, target_dir: Path, *, suffix: str = "") -> Path:

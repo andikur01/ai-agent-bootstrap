@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from app.core.logging_setup import RedactionFilter, setup_logging
 from app.security.redact import PLACEHOLDER, redact, redact_mapping
@@ -78,6 +79,27 @@ def test_filter_scrubs_extra_fields():
     record.api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"
     RedactionFilter().filter(record)
     assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in record.api_key
+
+
+def test_screenshot_secret_regions_are_blurred(tmp_path):
+    """A screenshot that renders a secret must not leave with it readable."""
+    from PIL import Image, ImageDraw
+
+    from app.services.browser_qa import mask_secrets_in_image
+
+    secret = "gsk_livesecretvalue1234567890"
+    src = tmp_path / "shot.png"
+    img = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((10, 10), secret, fill="black")
+    img.save(src)
+
+    out = Path(mask_secrets_in_image(src, [secret]))
+    assert out.exists() and out != str(src)
+    with Image.open(out) as masked:
+        strip = masked.convert("RGB").crop((0, 0, 400, 40))
+        pixels = list(strip.getdata())
+    assert all(pixel != (0, 0, 0) for pixel in pixels)
 
 
 def test_assert_no_secrets_raises_for_known_value(settings, monkeypatch):
