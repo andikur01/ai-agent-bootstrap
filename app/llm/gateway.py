@@ -35,6 +35,9 @@ TIER_MODELS: dict[str, dict[str, str]] = {
         "hf": "huggingface/meta-llama/Meta-Llama-3-8B-Instruct",
         "openai": "gpt-4o-mini",
         "anthropic": "claude-3-5-haiku-20241022",
+        "deepseek": "deepseek/deepseek-chat",
+        "cerebras": "cerebras/llama3.1-8b",
+        "mistral": "mistral/mistral-small-latest",
         "custom": "openai/local-small",
     },
     "big": {
@@ -44,6 +47,9 @@ TIER_MODELS: dict[str, dict[str, str]] = {
         "hf": "huggingface/meta-llama/Meta-Llama-3-70B-Instruct",
         "openai": "gpt-4o",
         "anthropic": "claude-3-5-sonnet-20241022",
+        "deepseek": "deepseek/deepseek-reasoner",
+        "cerebras": "cerebras/llama-3.3-70b",
+        "mistral": "mistral/mistral-large-latest",
         "custom": "openai/local-big",
     },
 }
@@ -94,6 +100,9 @@ def _export_provider_env(provider: str, settings) -> None:
         "hf": "HF_TOKEN",
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "cerebras": "CEREBRAS_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
         "custom": "CUSTOM_LLM_API_KEY",
     }
     env_name = names.get(provider)
@@ -163,6 +172,9 @@ class LLMGateway:
             "hf": "HF_TOKEN",
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "cerebras": "CEREBRAS_API_KEY",
+            "mistral": "MISTRAL_API_KEY",
             "custom": "CUSTOM_LLM_API_KEY",
         }
         env_name = names.get(provider)

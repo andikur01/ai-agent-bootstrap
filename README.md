@@ -163,6 +163,9 @@ Cukup ngobrol seperti biasa, atau pakai perintah:
 | `/bataljadwal <id>` | Batalkan reminder |
 | `/batal` | Batalkan konfirmasi yang menunggu |
 | `/browse <url> <tugas>` | Buka situs, klik & isi form sendiri |
+| `/keys` | Status key pool, sisa kuota per key |
+| `/keys add <provider> <key>` | Tambah key tanpa restart (langsung dipakai) |
+| `/keys login [provider]` | Link login + cara ambil key |
 | `/admin` | Panel admin (khusus `TELEGRAM_ADMIN_USER_IDS`) |
 
 Contoh percakapan:

@@ -593,6 +593,27 @@ class TelegramBot:
         await self._run_confirmed(update, context, Intent.THINK, {"text": question})
 
     async def cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        args = list(context.args or [])
+        sub = args[0].lower() if args else "status"
+
+        if sub == "login":
+            from app.llm.credentials import PROVIDERS, login_help, resolve_provider
+
+            provider = resolve_provider(args[1]) if len(args) > 1 else None
+            if len(args) > 1 and provider is None:
+                await update.message.reply_text(
+                    f"Provider `{' '.join(args[1:])}` tidak dikenal. "
+                    f"Pilihan: {', '.join(PROVIDERS)}",
+                    parse_mode="Markdown",
+                )
+                return
+            await update.message.reply_text(login_help(provider), parse_mode="Markdown")
+            return
+
+        if sub in ("add", "tambah"):
+            await self._keys_add(update, " ".join(args[1:]))
+            return
+
         pool = getattr(self.gateway, "key_pool", None)
         if pool is None:
             await update.message.reply_text("Key pool belum aktif.")
@@ -601,10 +622,110 @@ class TelegramBot:
         lines += pool.status_lines()
         lines += [
             "",
-            "Tambah key: isi `GEMINI_API_KEY_2`, `_3`, dst di `.env`, lalu restart.",
-            "Key disimpan hanya di `.env` — tidak pernah dikirim ke chat.",
+            "*Tambah key:*",
+            "`/keys add gemini AIza...` — langsung dipakai, tanpa restart",
+            "`/keys login gemini` — link login + cara dapat key",
+            "`/keys login` — daftar semua provider",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _keys_add(self, update: Update, raw: str) -> None:
+        """Validate a pasted key, store it, and start using it immediately."""
+        from app.llm.credentials import (
+            append_key,
+            find_key_in_text,
+            key_shape_ok,
+            mask,
+            next_slot,
+        )
+
+        found = find_key_in_text(raw)
+        if found is None:
+            await update.message.reply_text(
+                "Aku tidak menemukan key di pesan itu.\n\n"
+                "Format: `/keys add gemini AIza...`\n"
+                "Butuh link login? `/keys login gemini`",
+                parse_mode="Markdown",
+            )
+            return
+        provider, key = found
+
+        if not key_shape_ok(provider, key):
+            await update.message.reply_text(
+                f"Bentuk key itu tidak seperti key *{provider.label}*.\n"
+                f"Cek lagi, atau lihat `/keys login {provider.name}`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        probe = await self._probe_key(provider, key)
+        if not probe["ok"]:
+            await update.message.reply_text(
+                f"Key *{provider.label}* ditolak provider.\n\n"
+                f"Alasan: {probe['reason']}\n\n"
+                "Key tidak aku simpan. Coba ambil yang baru dari "
+                f"{provider.console_url}",
+                parse_mode="Markdown",
+            )
+            return
+
+        env_path = Path(self.settings.env_file)
+        slot = next_slot(env_path, provider.env_var)
+        var = append_key(env_path, provider, key, slot)
+
+        # Refresh the live pool so the key works now, not after a restart.
+        pool = getattr(self.gateway, "key_pool", None)
+        if pool is not None:
+            from app.llm.key_pool import KeyState
+
+            states = pool.states.setdefault(provider.name, [])
+            if not any(s.key == key for s in states):
+                states.append(KeyState(provider=provider.name, slot=slot, key=key))
+
+        await update.message.reply_text(
+            f"✅ Key *{provider.label}* tersimpan sebagai `{var}` ({mask(key)}).\n\n"
+            f"{probe['reason']}\n"
+            f"Sudah langsung dipakai — tidak perlu restart.\n\n"
+            f"Cek: `/keys`",
+            parse_mode="Markdown",
+        )
+
+    async def _probe_key(self, provider, key: str) -> dict:
+        """Ask the provider whether the key works before trusting it."""
+        import httpx
+
+        checks = {
+            "groq": ("https://api.groq.com/openai/v1/models", "Bearer"),
+            "deepseek": ("https://api.deepseek.com/models", "Bearer"),
+            "openrouter": ("https://openrouter.ai/api/v1/models", "Bearer"),
+            "cerebras": ("https://api.cerebras.ai/v1/models", "Bearer"),
+            "mistral": ("https://api.mistral.ai/v1/models", "Bearer"),
+            "hf": ("https://huggingface.co/api/whoami-v2", "Bearer"),
+            "gemini": (
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={key}",
+                "none",
+            ),
+        }
+        entry = checks.get(provider.name)
+        if entry is None:
+            return {"ok": True, "reason": "Provider tidak punya cek cepat; key disimpan."}
+        url, auth = entry
+        headers = {"Authorization": f"Bearer {key}"} if auth == "Bearer" else {}
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(url, headers=headers)
+        except Exception as exc:  # noqa: BLE001 - network trouble is not a bad key
+            return {
+                "ok": False,
+                "reason": f"Tidak bisa menghubungi provider ({type(exc).__name__}). Coba lagi.",
+            }
+        if response.status_code == 200:
+            return {"ok": True, "reason": "Provider menerima key ini."}
+        if response.status_code in (401, 403):
+            return {"ok": False, "reason": f"HTTP {response.status_code} — key invalid atau dicabut."}
+        if response.status_code == 429:
+            return {"ok": True, "reason": "Key valid, tapi kuota hariannya sedang habis."}
+        return {"ok": False, "reason": f"HTTP {response.status_code} dari provider."}
 
     async def cmd_memori(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_confirmed(update, context, Intent.MEMORY_QUERY, {"mode": "stats"})

@@ -4,6 +4,8 @@ Each test pins a failure that actually reached the user, so it cannot come back.
 """
 from __future__ import annotations
 
+import os
+
 import re
 
 import pytest
@@ -311,3 +313,97 @@ def test_rate_limit_detection_separates_throttle_from_bad_key():
     assert looks_like_rate_limit(Exception("Error 429: rate limit exceeded"))
     assert looks_like_rate_limit(Exception("Resource exhausted: quota"))
     assert not looks_like_rate_limit(Exception("Invalid API key provided"))
+
+
+# ---------------------------------------------------------------------------
+# Adding keys at runtime (/keys add) - parse, validate, store, use.
+# ---------------------------------------------------------------------------
+
+def test_provider_alias_resolution():
+    from app.llm.credentials import resolve_provider
+
+    assert resolve_provider("google").name == "gemini"
+    assert resolve_provider("google ai").name == "gemini"
+    assert resolve_provider("deep seek").name == "deepseek"
+    assert resolve_provider("huggingface").name == "hf"
+    assert resolve_provider("ngawur") is None
+
+
+def test_provider_guessed_from_key_shape():
+    from app.llm.credentials import guess_provider_from_key
+
+    assert guess_provider_from_key("AIza" + "x" * 32).name == "gemini"
+    assert guess_provider_from_key("gsk_" + "a" * 40).name == "groq"
+    assert guess_provider_from_key("hf_" + "b" * 30).name == "hf"
+    assert guess_provider_from_key("ngawur") is None
+
+
+def test_key_extracted_from_chatty_message():
+    """Users paste keys with prose around them; find it anyway."""
+    from app.llm.credentials import find_key_in_text
+
+    found = find_key_in_text("nih key gw gsk_" + "a" * 40 + " buat groq")
+    assert found is not None
+    assert found[0].name == "groq"
+    assert found[1] == "gsk_" + "a" * 40
+
+    assert find_key_in_text("halo apa kabar") is None
+
+
+def test_wrong_shaped_key_is_rejected():
+    from app.llm.credentials import PROVIDERS, key_shape_ok
+
+    gemini = PROVIDERS["gemini"]
+    assert key_shape_ok(gemini, "AIza" + "z" * 32)
+    assert not key_shape_ok(gemini, "asdfghjkl")
+
+
+def test_new_key_gets_next_free_slot_and_is_used_immediately(tmp_path, monkeypatch):
+    from app.llm.credentials import PROVIDERS, append_key, next_slot
+
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=AIza" + "1" * 32 + "\n")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza" + "1" * 32)
+
+    assert next_slot(env, "GEMINI_API_KEY") == 2
+    var = append_key(env, PROVIDERS["gemini"], "AIza" + "2" * 32, 2)
+    assert var == "GEMINI_API_KEY_2"
+    assert "GEMINI_API_KEY_2=AIza" + "2" * 32 in env.read_text()
+    # Usable without a restart.
+    assert os.environ["GEMINI_API_KEY_2"] == "AIza" + "2" * 32
+    assert next_slot(env, "GEMINI_API_KEY") == 3
+
+
+def test_login_help_always_points_at_a_real_url():
+    from app.llm.credentials import PROVIDERS, login_help
+
+    for provider in PROVIDERS.values():
+        text = login_help(provider)
+        assert "https://" in text
+        assert "/keys add" in text
+        assert "Login" in text or "login" in text
+
+
+def test_new_providers_have_models_and_env_names():
+    from app.llm.gateway import TIER_MODELS
+
+    for provider in ("deepseek", "cerebras", "mistral"):
+        assert provider in TIER_MODELS["small"]
+        assert provider in TIER_MODELS["big"]
+
+
+def test_new_provider_joins_order_even_if_not_in_fallback_list(monkeypatch):
+    """A key added for a provider missing from LLM_FALLBACK_ORDER still works.
+
+    Otherwise /keys add deepseek would report success and change nothing.
+    """
+    from app.core.config import Settings
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-" + "d" * 40)
+    monkeypatch.setenv("LLM_FALLBACK_ORDER", "groq,gemini")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_" + "g" * 40)
+    settings = Settings(_env_file=None)
+
+    order = settings.available_providers()
+    assert "deepseek" in order
+    assert order.index("groq") < order.index("deepseek")

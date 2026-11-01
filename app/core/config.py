@@ -49,11 +49,24 @@ class Settings(BaseSettings):
     hf_token: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    deepseek_api_key: str = ""
+    cerebras_api_key: str = ""
+    mistral_api_key: str = ""
     custom_llm_base_url: str = ""
     custom_llm_api_key: str = ""
 
     llm_fallback_order: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["groq", "gemini", "openrouter", "hf", "openai"]
+        default_factory=lambda: [
+            "groq",
+            "gemini",
+            "cerebras",
+            "deepseek",
+            "openrouter",
+            "mistral",
+            "hf",
+            "openai",
+            "anthropic",
+        ]
     )
     small_model: str = "groq/llama-3.1-8b-instant"
     big_model: str = "groq/llama-3.3-70b-versatile"
@@ -152,6 +165,11 @@ class Settings(BaseSettings):
     def sqlite_path(self) -> Path:
         return self.data_path / "agent.sqlite3"
 
+    @property
+    def env_file(self) -> Path:
+        """Where keys added at runtime get written. Never committed."""
+        return Path(ENV_FILE)
+
     def provider_keys(self) -> dict[str, str]:
         return {
             "groq": self.groq_api_key,
@@ -160,6 +178,9 @@ class Settings(BaseSettings):
             "hf": self.hf_token,
             "openai": self.openai_api_key,
             "anthropic": self.anthropic_api_key,
+            "deepseek": self.deepseek_api_key,
+            "cerebras": self.cerebras_api_key,
+            "mistral": self.mistral_api_key,
             "custom": self.custom_llm_api_key,
         }
 
@@ -183,13 +204,19 @@ class Settings(BaseSettings):
             "hf": "HF_TOKEN",
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "cerebras": "CEREBRAS_API_KEY",
+            "mistral": "MISTRAL_API_KEY",
             "custom": "CUSTOM_LLM_API_KEY",
         }
         base = self.provider_keys()
         pool: dict[str, list[str]] = {}
         for provider, env_name in env_names.items():
             keys: list[str] = []
-            for candidate in [base.get(provider, "")] + [
+            # Prefer os.environ over the frozen field: a key added at runtime
+            # lands there, and the bot must pick it up without a restart.
+            primary = os.environ.get(env_name, "").strip() or base.get(provider, "")
+            for candidate in [primary] + [
                 os.environ.get(f"{env_name}_{i}", "") for i in range(1, 11)
             ]:
                 candidate = (candidate or "").strip()
@@ -200,8 +227,17 @@ class Settings(BaseSettings):
         return pool
 
     def available_providers(self) -> list[str]:
-        keys = self.provider_keys()
+        # Read the pool rather than the frozen fields: a key added at runtime
+        # (via /keys) lands in os.environ, and the bot must use it without a
+        # restart.
+        keys = self.provider_key_pool()
         order = [p for p in self.llm_fallback_order if keys.get(p)]
+        # A provider with a key but no mention in LLM_FALLBACK_ORDER would be
+        # silently ignored - the user adds a DeepSeek key and nothing changes.
+        # Append those after the configured order so new keys always take part.
+        for provider in keys:
+            if provider not in order and provider != "custom":
+                order.append(provider)
         if self.custom_llm_base_url and self.custom_llm_api_key and "custom" not in order:
             order.append("custom")
         return order
@@ -224,6 +260,9 @@ class Settings(BaseSettings):
             self.supabase_db_password,
             self.n8n_api_key,
             self.replicate_api_token,
+            self.deepseek_api_key,
+            self.cerebras_api_key,
+            self.mistral_api_key,
         ):
             if extra and len(extra) >= 8:
                 values.append(extra)
