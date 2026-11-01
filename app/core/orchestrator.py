@@ -339,6 +339,11 @@ class Orchestrator:
     # --------------------------------------------------------------- gambar
     async def _do_image_create(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
         prompt = _clean_prompt(route.args.get("text") or "")
+        if not prompt:
+            return Outcome(
+                text="Mau gambar apa? Tulis deskripsinya, contoh:\n"
+                "`/buat_gambar kucing astronot di bulan, gaya cat air`"
+            )
         size = _extract_size(prompt) or "1024x1024"
         result = await self.images.generate(prompt, size=size, progress=progress)
         artifact = await self.memory.register_artifact(

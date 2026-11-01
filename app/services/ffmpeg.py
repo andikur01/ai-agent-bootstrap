@@ -31,9 +31,23 @@ class FFmpegPaths:
 
 _resolved: FFmpegPaths | None = None
 
+_LOCAL_BIN_DIRS = (
+    Path.home() / ".local" / "bin",
+    Path("/usr/local/bin"),
+    Path("/opt/ffmpeg/bin"),
+)
+
+
+def _find_local_bin(name: str) -> Path | None:
+    for directory in _LOCAL_BIN_DIRS:
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
 
 def resolve_ffmpeg(settings=None) -> FFmpegPaths:
-    """Locate ffmpeg/ffprobe: explicit config -> PATH -> imageio-ffmpeg wheel."""
+    """Locate ffmpeg/ffprobe: explicit config -> PATH -> local bin -> imageio wheel."""
     global _resolved
     if _resolved is not None:
         return _resolved
@@ -48,6 +62,13 @@ def resolve_ffmpeg(settings=None) -> FFmpegPaths:
     system = shutil.which("ffmpeg")
     if system:
         _resolved = FFmpegPaths(system, shutil.which("ffprobe") or system, "system")
+        return _resolved
+
+    # A static build dropped in ~/.local/bin is invisible to a bot started
+    # without an interactive shell, so look there before giving up.
+    local = _find_local_bin("ffmpeg")
+    if local:
+        _resolved = FFmpegPaths(str(local), str(_find_local_bin("ffprobe") or local), "local-bin")
         return _resolved
 
     try:

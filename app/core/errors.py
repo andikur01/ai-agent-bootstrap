@@ -32,6 +32,15 @@ class ProviderUnavailableError(AgentError):
     user_message = "Semua provider AI sedang tidak bisa dihubungi."
 
 
+class InvalidApiKeyError(AgentError):
+    """A key was sent and rejected - not a network or request-shape problem."""
+
+    user_message = (
+        "API key ditolak oleh provider (bukan masalah jaringan).\n"
+        "Cek key-nya masih aktif, lalu perbarui di `.env` dan restart bot."
+    )
+
+
 class BudgetExceededError(AgentError):
     user_message = "Budget token harian sudah habis. Naikkan `DAILY_TOKEN_BUDGET` kalau perlu."
 

@@ -114,7 +114,23 @@ def main() -> int:
     import sys as _sys
 
     bin_dir = Path(_sys.executable).parent
-    for name in ("ffmpeg", "ffprobe", "manim", "espeak-ng"):
+
+    # Report what the bot will actually use, not just what PATH happens to
+    # expose - a static build in ~/.local/bin is valid but invisible to which().
+    try:
+        from app.services.ffmpeg import resolve_ffmpeg
+
+        resolved = resolve_ffmpeg()
+        if resolved.available:
+            line("ffmpeg", OK, f"{resolved.ffmpeg} ({resolved.source})")
+            line("ffprobe", OK if resolved.ffprobe else WARN, resolved.ffprobe or "tidak ada")
+        else:
+            line("ffmpeg", WARN, "tidak terpasang (video/audio edit akan gagal)")
+            line("ffprobe", WARN, "tidak terpasang")
+    except Exception as exc:  # noqa: BLE001
+        line("ffmpeg", WARN, f"tidak bisa dipastikan: {exc}")
+
+    for name in ("manim", "espeak-ng"):
         path = shutil.which(name) or shutil.which(name, path=str(bin_dir))
         if not path and importlib.util.find_spec(name.replace("-", "_")) is not None:
             path = "(modul Python)"

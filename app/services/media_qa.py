@@ -215,10 +215,15 @@ def check_video(path: str | Path, *, min_seconds: float = 1.0, min_bytes: int = 
                 if frames and str(frames).isdigit() and int(frames) < 2:
                     reasons.append("jumlah frame tidak wajar")
         else:
+            # No probe data means nothing was actually verified. Reporting OK
+            # here is how a 0-second file once shipped as a finished video, so
+            # an unverifiable artifact is treated as a failure.
             metrics["probe_error"] = "ffprobe kosong"
+            reasons.append("tidak bisa diverifikasi (ffprobe tidak mengembalikan data)")
     except Exception as exc:  # noqa: BLE001
         log.warning("video quality probe failed: %s", exc)
         metrics["probe_error"] = str(exc)[:200]
+        reasons.append("tidak bisa diverifikasi (ffprobe gagal)")
 
     return QualityVerdict(not reasons, _score(len(reasons), metrics), reasons, metrics)
 

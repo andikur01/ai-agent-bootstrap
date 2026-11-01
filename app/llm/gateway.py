@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.core.errors import MissingSecretError, ProviderUnavailableError
+from app.core.errors import InvalidApiKeyError, MissingSecretError, ProviderUnavailableError
 from app.core.logging_setup import get_logger
 from app.core.utils import run_blocking
 from app.llm.tokens import count_message_tokens, trim_messages
@@ -233,9 +233,13 @@ class LLMGateway:
                     else:
                         break  # move to next provider
 
-        raise ProviderUnavailableError(
-            "Semua provider gagal: " + ", ".join(attempts), detail=str(last_error)
-        )
+        summary = "Semua provider gagal: " + ", ".join(attempts)
+        # LiteLLM reports an invalid key as BadRequestError, which reads like a
+        # malformed request and sent us chasing the wrong problem. Say plainly
+        # that the key was rejected.
+        if _looks_like_auth_failure(last_error):
+            raise InvalidApiKeyError(summary, detail=str(last_error))
+        raise ProviderUnavailableError(summary, detail=str(last_error))
 
     # ------------------------------------------------------------------
     async def complete_json(
@@ -319,3 +323,25 @@ class LLMGateway:
 
 def build_gateway(settings, budget=None) -> LLMGateway:
     return LLMGateway(settings, budget=budget)
+
+
+_AUTH_FAILURE_MARKERS = (
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "api key not valid",
+    "authentication",
+    "unauthorized",
+    "permission denied",
+    "invalid authentication",
+)
+
+
+def _looks_like_auth_failure(error: Exception | None) -> bool:
+    """True when the provider rejected the credential rather than the request."""
+    if error is None:
+        return False
+    if isinstance(error, PermissionError):
+        return True
+    blob = f"{type(error).__name__} {error}".lower()
+    return any(marker in blob for marker in _AUTH_FAILURE_MARKERS)

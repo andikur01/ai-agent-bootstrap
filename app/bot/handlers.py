@@ -47,44 +47,50 @@ MENU_PREFIX = "menu:"
 
 # Section id -> (button label, body). Kept as plain data so the content can be
 # tested without a Telegram connection.
+#
+# Command names are wrapped in backticks on purpose: send_text uses
+# parse_mode="Markdown", where a bare "_" starts italics and Telegram silently
+# swallows it, turning "/buat_gambar" into "/buatgambar" on the user's screen.
+# Inside backticks the underscore is literal, so what the user reads is what
+# they can type.
 MENU_SECTIONS: dict[str, tuple[str, str]] = {
     "chat": (
         "💬 Chat & Thinking",
         "💬 *CHAT & THINKING*\n\n"
-        "/pikir <topik> - Analisis mendalam 5 langkah\n"
-        "/belajar <topik> - Cari di internet, rangkum, simpan permanen\n"
-        "/memori - Statistik memori & token terpakai\n"
-        "/feedback <pesan> - Catat saranmu",
+        "`/pikir` <topik> - Analisis mendalam 5 langkah\n"
+        "`/belajar` <topik> - Cari di internet, rangkum, simpan permanen\n"
+        "`/memori` - Statistik memori & token terpakai\n"
+        "`/feedback` <pesan> - Catat saranmu",
     ),
     "creative": (
         "🎨 Creative",
         "🎨 *CREATIVE*\n\n"
-        "/buat_gambar <deskripsi> - Generate gambar AI\n"
-        "/edit_gambar <deskripsi> - Edit gambar terakhir\n"
-        "/buat_video <deskripsi> - Buat video animasi\n"
-        "/edit_video <deskripsi> - Edit video terakhir\n"
-        "/text_to_voice <teks> - Teks jadi suara\n"
-        "/voice_to_text - Voice note jadi teks",
+        "`/buat_gambar` <deskripsi> - Generate gambar AI\n"
+        "`/edit_gambar` <deskripsi> - Edit gambar terakhir\n"
+        "`/buat_video` <deskripsi> - Buat video animasi\n"
+        "`/edit_video` <deskripsi> - Edit video terakhir\n"
+        "`/text_to_voice` <teks> - Teks jadi suara\n"
+        "`/voice_to_text` - Voice note jadi teks",
     ),
     "web": (
         "🌐 Web",
         "🌐 *WEB DEVELOPMENT*\n\n"
-        "/buat_web <deskripsi> - Website static (dites dulu, lalu dikirim)\n"
-        "/buat_web_full <deskripsi> - Website fullstack + login + database\n"
-        "/perbaiki_web <link> - Perbaiki website yang error",
+        "`/buat_web` <deskripsi> - Website static (dites dulu, lalu dikirim)\n"
+        "`/buat_web_full` <deskripsi> - Website fullstack + login + database\n"
+        "`/perbaiki_web` <link> - Perbaiki website yang error",
     ),
     "automation": (
         "⚙️ Automation",
         "⚙️ *AUTOMATION*\n\n"
-        "/buat_n8n <deskripsi> - Buat workflow n8n\n"
-        "/ingat <waktu> <pesan> - Set reminder\n"
-        "/jadwal - Lihat semua jadwal\n"
-        "/bataljadwal <id> - Batalkan satu jadwal",
+        "`/buat_n8n` <deskripsi> - Buat workflow n8n\n"
+        "`/ingat` <waktu> <pesan> - Set reminder\n"
+        "`/jadwal` - Lihat semua jadwal\n"
+        "`/bataljadwal` <id> - Batalkan satu jadwal",
     ),
     "link": (
         "🔗 Link & Media",
         "🔗 *LINK & MEDIA*\n\n"
-        "/baca_link <url> - Baca & rangkum isi link\n"
+        "`/baca_link` <url> - Baca & rangkum isi link\n"
         "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
         "Kirim voice note - Langsung ditranskrip\n"
         "Kirim foto - Bisa langsung diedit",
@@ -92,11 +98,11 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
     "system": (
         "📊 System",
         "📊 *SYSTEM*\n\n"
-        "/status - Status bot & provider API\n"
-        "/status_model - Model AI yang aktif\n"
-        "/menu - Tampilkan menu ini\n"
-        "/help - Bantuan lengkap\n"
-        "/batal - Batalkan konfirmasi",
+        "`/status` - Status bot & provider API\n"
+        "`/status_model` - Model AI yang aktif\n"
+        "`/menu` - Tampilkan menu ini\n"
+        "`/help` - Bantuan lengkap\n"
+        "`/batal` - Batalkan konfirmasi",
     ),
 }
 
@@ -106,8 +112,8 @@ MENU_TEXT = (
     "perintahnya. Aku juga paham bahasa biasa - cukup bilang\n"
     "\"buatkan gambar kucing\", nggak wajib pakai perintah.\n\n"
     + "\n\n".join(body for _, body in MENU_SECTIONS.values())
-    + "\n\n📊 /status - cek bot & API\n"
-    "❓ /help - bantuan lengkap"
+    + "\n\n📊 `/status` - cek bot & API\n"
+    "❓ `/help` - bantuan lengkap"
 )
 
 
@@ -297,6 +303,20 @@ class TelegramBot:
             has_voice=bool(voice_path),
             has_document=bool(document_path),
         )
+
+        # A slash-word that matched no command and no rule would otherwise be
+        # treated as free chat, so a typo like "/buatgambar" burned an LLM call
+        # and returned a provider error. Say so instead, and show the menu.
+        if text.startswith("/") and route.source == "fallback":
+            await send_text(
+                message,
+                f"Command `{text.split()[0]}` tidak ada.\n\n"
+                "Cek `/menu` untuk daftar lengkap, atau tulis maksudmu pakai\n"
+                "bahasa biasa (contoh: \"buatkan gambar kucing\").",
+                reply_markup=menu_keyboard(),
+            )
+            return
+
         route.args.update(
             {
                 "photo_path": photo_path,
