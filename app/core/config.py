@@ -70,7 +70,9 @@ class Settings(BaseSettings):
     )
     small_model: str = "groq/openai/gpt-oss-20b"
     big_model: str = "groq/openai/gpt-oss-120b"
-    daily_token_budget: int = 200_000
+    # 0 = tidak dibatasi. Cap membuat AI menyerah di tengah tugas dan
+    # mengirim hasil jelek, jadi default-nya bebas.
+    daily_token_budget: int = 0
     semantic_cache_enabled: bool = True
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2

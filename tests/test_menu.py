@@ -83,9 +83,13 @@ def bot(settings, store):
     return TelegramBot(settings=settings, store=store, orchestrator=StubOrchestrator(), scheduler=None)
 
 
-def test_menu_text_lists_every_section_body():
-    for _, body in MENU_SECTIONS.values():
-        assert body in MENU_TEXT
+def test_menu_text_explains_what_the_agent_does():
+    """The menu is an explanation, not a list of buttons to choose from."""
+    assert "Yang bisa aku kerjakan" in MENU_TEXT
+    for topic in ("Website", "Otomasi", "Gambar", "Link"):
+        assert topic in MENU_TEXT
+    # It must tell the user they can just talk.
+    assert "bahasa biasa" in MENU_TEXT
 
 
 def test_menu_keyboard_labels_cover_every_section():
@@ -126,11 +130,12 @@ def test_help_mentions_the_creative_commands_it_advertises():
 
 
 @pytest.mark.asyncio
-async def test_cmd_menu_sends_text_with_keyboard(bot):
+async def test_cmd_menu_sends_explanation_without_keyboard(bot):
+    """No keyboard: a chooser is what the user explicitly did not want."""
     update = FakeUpdate()
     await bot.cmd_menu(update, FakeContext())
     assert update.effective_message.texts
-    assert update.effective_message.markups[-1] is not None
+    assert update.effective_message.markups[-1] is None, "menu must not offer buttons"
 
 
 @pytest.mark.asyncio

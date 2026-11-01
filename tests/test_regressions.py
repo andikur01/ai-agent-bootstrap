@@ -17,14 +17,16 @@ from app.services.media_qa import check_video
 
 
 # ------------------------------------------------- 1. menu must not eat "_"
-def test_every_command_in_menu_is_backticked():
+def test_every_command_in_help_is_backticked():
     """A bare "_" is Markdown italics, which hid "/buatgambar" from the user."""
+    from app.bot.handlers import HELP_TEXT as _HELP
+
     command_lines = [
         line
-        for line in MENU_TEXT.splitlines()
+        for line in _HELP.splitlines()
         if line.strip().startswith("/") or re.match(r"^`?/[a-z_]+", line.strip())
     ]
-    assert command_lines, "menu must list commands"
+    assert command_lines, "help must list commands"
     for line in command_lines:
         if "/" in line:
             # the command token itself must sit inside backticks
@@ -801,15 +803,20 @@ def test_status_question_is_flagged_for_factual_answer():
     assert route.args.get("ask_status") is True
 
 
-def test_menu_is_short_and_help_keeps_the_rest():
-    """The menu shows what is in use; /help keeps everything else reachable."""
+def test_menu_explains_and_help_lists_the_commands():
+    """The menu explains capabilities; every command stays reachable in /help."""
     from app.bot.handlers import HELP_TEXT, MENU_SECTIONS, MENU_TEXT
 
     assert set(MENU_SECTIONS) == {"web", "automation", "system"}
+    # The menu describes what the agent does, in plain language.
+    assert "Yang bisa aku kerjakan" in MENU_TEXT
+    # Commands are documented, but behind /help rather than in the way.
     for command in ("/buat_web", "/buat_web_full", "/perbaiki_web"):
-        assert command in MENU_TEXT
-    for command in ("/live", "/login", "/keys"):
         assert command in HELP_TEXT
+    # live view is automatic now, so it is not advertised as a command
+    for command in ("/login", "/keys"):
+        assert command in HELP_TEXT
+    assert "live view menyala otomatis" in HELP_TEXT
 
 
 def test_watchable_intents_use_enum_members():

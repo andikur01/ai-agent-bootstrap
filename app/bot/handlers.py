@@ -97,6 +97,15 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
 # Full help stays available behind /help, but the menu shows only what is
 # actually in use. A wall of commands for features nobody calls is noise.
 HELP_EXTRA = (
+    "🌐 *WEB*\n\n"
+    "`/buat_web` <deskripsi> - Situs statis profesional\n"
+    "`/buat_web_full` <deskripsi> - Fullstack: login + database\n"
+    "`/perbaiki_web` <link> - Perbaiki situs yang error\n\n"
+    "⚙️ *N8N & JADWAL*\n\n"
+    "`/buat_n8n` <deskripsi> - Workflow siap impor\n"
+    "`/ingat` <waktu> <pesan> - Set reminder\n"
+    "`/jadwal` - Lihat semua jadwal\n"
+    "`/bataljadwal` <id> - Batalkan jadwal\n\n"
     "🎨 *CREATIVE* (belum jadi fokus)\n\n"
     "`/buat_gambar` <deskripsi> - Generate gambar\n"
     "`/edit_gambar` <deskripsi> - Edit gambar terakhir\n"
@@ -109,7 +118,7 @@ HELP_EXTRA = (
     "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
     "Kirim voice note - Langsung ditranskrip\n\n"
     "🖥️ *BROWSER & KEY*\n\n"
-    "`/live` - Nonton layar browser AI dari HP\n"
+    "(live view menyala otomatis di tugas panjang, tidak perlu perintah)\n"
     "`/login` <url> - Login sekali ke situs provider\n"
     "`/keys` - Status key pool\n"
     "`/keys auto` <provider> - Ambil key otomatis\n"
@@ -122,13 +131,30 @@ HELP_EXTRA = (
 )
 
 MENU_TEXT = (
-    "🤖 *AI Agent*\n\n"
-    "Bilang saja pakai bahasa biasa, aku paham. Contoh:\n"
-    "• `buatkan web toko laptop`\n"
-    "• `buatkan workflow n8n untuk chat otomatis`\n"
-    "• `apakah webnya sudah jadi?`\n\n"
-    + "\n\n".join(body for _, body in MENU_SECTIONS.values())
-    + "\n\nKetik `/help` untuk semua perintah."
+    "🤖 *Yang bisa aku kerjakan*\n\n"
+    "Kamu tidak perlu hafal perintah. Tulis saja maumu pakai bahasa biasa,\n"
+    "aku yang cari tahu maksudnya. Perintah `/` cuma jalan pintas, bukan syarat.\n\n"
+    "*🌐 Website*\n"
+    "Situs statis (landing page, portofolio, toko) dan web fullstack dengan\n"
+    "login + database. Aku tulis kodenya, aku tes sendiri pakai browser, aku\n"
+    "screenshot, baru aku kirim. Kalau jelek aku perbaiki dulu, bukan dikirim\n"
+    "mentah. Contoh: `buatkan web toko kopi`\n\n"
+    "*⚙️ Otomasi*\n"
+    "Workflow n8n siap impor, plus pengingat dan jadwal berulang.\n"
+    "Contoh: `buatkan workflow n8n untuk balas chat otomatis`\n\n"
+    "*🖼️ Gambar & video*\n"
+    "Buat dan edit gambar, buat dan edit video, teks ke suara, suara ke teks.\n"
+    "Contoh: `buatkan poster anak-anak`\n\n"
+    "*🔗 Link*\n"
+    "Kirim link apa saja - YouTube, TikTok, IG, artikel. Aku ambil isinya,\n"
+    "aku tonton/transkrip, lalu jawab pertanyaanmu tentang isi link itu.\n\n"
+    "*💬 Ngobrol & ingatan*\n"
+    "Aku ingat semua obrolan kita. \"lanjutkan yang tadi\", \"perbaiki yang\n"
+    "kemarin\" - aku tahu persis yang mana. Tanya \"apakah webnya sudah jadi?\"\n"
+    "kapan saja, aku jawab dari catatanku.\n\n"
+    "*📚 Belajar*\n"
+    "`belajar <topik>` - aku cari di internet, rangkum, simpan permanen.\n\n"
+    "Ketik `/help` untuk daftar perintah lengkap. Tapi ingat: kamu tidak butuh itu."
 )
 
 # /help shows the full command list; the menu stays short.
@@ -356,7 +382,6 @@ class TelegramBot:
                 f"Command `{text.split()[0]}` tidak ada.\n\n"
                 "Cek `/menu` untuk daftar lengkap, atau tulis maksudmu pakai\n"
                 "bahasa biasa (contoh: \"buatkan gambar kucing\").",
-                reply_markup=menu_keyboard(),
             )
             return
 
@@ -601,13 +626,21 @@ class TelegramBot:
                 await update.effective_message.reply_text(exc.user_message)
                 return
             await self.store.upsert_user(user.id, user.username or "", user.first_name or "")
-        await send_text(update.effective_message, HELP_TEXT)
+        # /start explains what the agent does. The command list lives in /help
+        # for the rare case someone wants to type instead of talk.
+        await send_text(update.effective_message, MENU_TEXT)
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_text(update.effective_message, HELP_TEXT)
 
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await send_text(update.effective_message, MENU_TEXT, reply_markup=menu_keyboard())
+        """Explain what the agent can do. No buttons: this is not a chooser.
+
+        The user was explicit - they do not want to pick from a menu, they want
+        to say a sentence and have the agent work out the rest. A keyboard here
+        invited the opposite behaviour, so the text stands alone.
+        """
+        await send_text(update.effective_message, MENU_TEXT)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         providers = self.settings.available_providers()
