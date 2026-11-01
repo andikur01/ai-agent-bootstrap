@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # ---------- Browser agent ----------
     # How many observe/act steps the agent may take on one page before it stops.
     browser_max_steps: int = 8
+    browser_login_seconds: int = 240
+    # Headless server? /login runs the browser under xvfb and sends screenshots.
+    browser_headful: bool = True
 
     # ---------- Search ----------
     tavily_api_key: str = ""

@@ -162,14 +162,29 @@ class RateLimiter:
 
 
 class TelegramBot:
-    def __init__(self, *, settings, store, orchestrator: Orchestrator, scheduler=None):
+    def __init__(
+        self,
+        *,
+        settings,
+        store,
+        orchestrator: Orchestrator,
+        scheduler=None,
+        profiles=None,
+        harvester=None,
+    ):
         self.settings = settings
         self.store = store
         self.orch = orchestrator
         self.scheduler = scheduler
+        self.profiles = profiles
+        self.harvester = harvester
         self.gate = ConfirmationGate(timeout_seconds=180)
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
         self._running: dict[int, asyncio.Task] = {}
+
+    @property
+    def gateway(self):
+        return getattr(self.orch, "gateway", None)
 
     # ------------------------------------------------------------ authorisation
     def _authorise(self, user_id: int) -> None:
@@ -477,12 +492,48 @@ class TelegramBot:
             await send_text(message, exc.user_message)
         except AgentError as exc:
             await self.store.update_task(task_id, "failed", str(exc))
-            await send_text(message, f"❌ {exc.user_message}\n\nDetail: {str(exc)[:300]}")
+            hint = self._capacity_hint()
+            await send_text(
+                message,
+                f"❌ {exc.user_message}\n\nDetail: {str(exc)[:300]}" + hint,
+            )
         except Exception as exc:  # noqa: BLE001
             await self.store.update_task(task_id, "failed", str(exc))
             await self.store.log_error(route.intent.value, f"{type(exc).__name__}: {exc}", user_id)
             log.exception("task crashed intent=%s", route.intent.value)
             await send_text(message, "❌ Ada error tak terduga. Sudah aku catat di log.")
+
+    def _capacity_hint(self) -> str:
+        """Tell the user where to get a key when every provider is exhausted.
+
+        A bare "all providers failed" leaves the user stuck. If the key pool
+        knows which providers are fully benched, name them and hand over the
+        exact console URL, so the fix is one click plus `/keys auto`.
+        """
+        pool = getattr(self.gateway, "key_pool", None)
+        if pool is None:
+            return ""
+        try:
+            spent = pool.exhausted()
+        except Exception:  # noqa: BLE001 - a hint must never break error handling
+            return ""
+        if not spent:
+            return ""
+        from app.llm.credentials import PROVIDERS
+
+        lines = ["", "🔑 *Key-nya sedang habis semua:*"]
+        for name in spent:
+            provider = PROVIDERS.get(name)
+            if not provider:
+                continue
+            ready = pool.soonest_ready(name)
+            lines.append(
+                f"• {provider.label} — siap lagi ~{ready}s\n"
+                f"  Tambah sekarang: `/keys auto {name}` atau `/keys add {name} <key>`"
+            )
+        lines.append("")
+        lines.append("Tambah key baru langsung dipakai, tanpa restart.")
+        return "\n".join(lines)
 
     # --------------------------------------------------------- commands
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -592,6 +643,176 @@ class TelegramBot:
             return
         await self._run_confirmed(update, context, Intent.THINK, {"text": question})
 
+    async def cmd_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Open a real browser so the user signs in once; we keep the session.
+
+        The password is never sent to the bot. The user types it into the browser
+        window (or watches progress screenshots on a headless server), and only
+        the resulting cookies are stored, in the gitignored data/ directory.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+        args = list(context.args or [])
+        if not args:
+            await update.message.reply_text(
+                "Pakai: `/login <url>`\n\n"
+                "Contoh:\n"
+                "`/login https://console.groq.com/keys`\n"
+                "`/login https://aistudio.google.com/apikey`\n\n"
+                "Aku buka browsernya, kamu login di situ. Password tidak "
+                "pernah lewat aku. Setelah itu `/keys auto <provider>` bisa "
+                "ambil key sendiri.",
+                parse_mode="Markdown",
+            )
+            return
+
+        url = args[0]
+        if not url.startswith("http"):
+            url = "https://" + url
+        if self.harvester is None:
+            await update.message.reply_text("Browser belum siap di server ini.")
+            return
+
+        from app.services.browser_session import host_from_url
+
+        host = host_from_url(url)
+        if self.profiles is not None:
+            self.profiles.permissions.remember(host, True)
+
+        seconds = int(getattr(self.settings, "browser_login_seconds", 240))
+        status = await update.message.reply_text(
+            f"🌐 Membuka browser di {host}...\n\n"
+            f"Login di jendela itu. Aku tunggu sampai {seconds} detik dan "
+            "kirim screenshot kalau perlu."
+        )
+
+        async def report(pct: int, text: str, screenshot=None) -> None:
+            try:
+                await status.edit_text(f"🌐 {pct}% — {text}")
+            except Exception:  # noqa: BLE001 - edits can be rate-limited
+                pass
+
+        result = await self.harvester.open_for_login(
+            url, user_id=user_id, seconds=seconds, progress=report
+        )
+
+        for shot in result.screenshots[-2:]:
+            try:
+                with open(shot, "rb") as handle:
+                    await update.message.reply_photo(handle)
+            except Exception:  # noqa: BLE001
+                pass
+
+        icon = "✅" if result.ok else "⚠️"
+        await update.message.reply_text(
+            f"{icon} {result.message}\n\n"
+            f"Kalau sudah: `/keys auto <provider>`",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_keys_auto(self, update: Update, raw: str) -> None:
+        """Fetch a new key from a console the user is already signed into."""
+        from app.llm.credentials import PROVIDERS, resolve_provider
+        from app.services.browser_session import host_from_url
+
+        args = raw.split()
+        provider = resolve_provider(args[0]) if args else None
+        if provider is None:
+            await update.message.reply_text(
+                "Pakai: `/keys auto <provider>`\n\n"
+                f"Provider: {', '.join(PROVIDERS)}\n\n"
+                "Belum login di situsnya? `/login <url>` dulu.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if self.harvester is None:
+            await update.message.reply_text("Browser belum siap di server ini.")
+            return
+
+        host = host_from_url(provider.console_url)
+        if self.profiles is not None and not self.profiles.permissions.is_allowed(host):
+            await update.message.reply_text(
+                f"Aku belum pernah diizinkan buka *{host}*.\n\n"
+                f"Jalankan dulu: `/login {provider.console_url}`\n"
+                "Setelah itu aku ingat izinnya.",
+                parse_mode="Markdown",
+            )
+            return
+
+        user_id = update.effective_user.id
+        status = await update.message.reply_text(
+            f"🤖 Mencoba ambil key *{provider.label}* sendiri...\n"
+            "Aku buka konsolnya, cari tombol buat key, lalu baca hasilnya.",
+            parse_mode="Markdown",
+        )
+
+        async def report(pct: int, text: str, screenshot=None) -> None:
+            try:
+                await status.edit_text(f"🤖 {pct}% — {text}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        result = await self.harvester.harvest(provider, user_id=user_id, progress=report)
+
+        if result.needs_login:
+            from app.llm.capacity import acquire_message
+
+            await update.message.reply_text(
+                acquire_message(provider.name, provider.console_url),
+                parse_mode="Markdown",
+            )
+            return
+
+        if not result.ok:
+            for shot in result.screenshots[-1:]:
+                try:
+                    with open(shot, "rb") as handle:
+                        await update.message.reply_photo(handle)
+                except Exception:  # noqa: BLE001
+                    pass
+            await update.message.reply_text(
+                f"❌ {result.message}\n\n"
+                f"Alternatif cepat: buka {provider.console_url}, "
+                f"bikin key, kirim ke sini: `/keys add {provider.name} <key>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Verify before trusting, then store as the next free slot.
+        probe = await self._probe_key(provider, result.key)
+        if not probe["ok"]:
+            await update.message.reply_text(
+                f"Key terbaca tapi provider menolak: {probe['reason']}",
+            )
+            return
+
+        from app.llm.credentials import append_key, next_slot
+
+        env_path = Path(self.settings.env_file)
+        slot = next_slot(env_path, provider.env_var)
+        var = append_key(env_path, provider, result.key, slot)
+        self._register_pool_key(provider, result.key, slot)
+
+        await update.message.reply_text(
+            f"✅ Key baru *{provider.label}* aktif ({result.masked_key()}) "
+            f"sebagai `{var}`.\n\n"
+            f"{probe['reason']}\n"
+            "Langsung dipakai, tanpa restart. Cek: `/keys`",
+            parse_mode="Markdown",
+        )
+
+    def _register_pool_key(self, provider, key: str, slot: int) -> None:
+        """Make a freshly stored key usable without restarting the process."""
+        pool = getattr(self.gateway, "key_pool", None)
+        if pool is None:
+            return
+        from app.llm.key_pool import KeyState
+
+        states = pool.states.setdefault(provider.name, [])
+        if not any(s.key == key for s in states):
+            states.append(KeyState(provider=provider.name, slot=slot, key=key))
+
     async def cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = list(context.args or [])
         sub = args[0].lower() if args else "status"
@@ -614,6 +835,14 @@ class TelegramBot:
             await self._keys_add(update, " ".join(args[1:]))
             return
 
+        if sub in ("auto", "ambil"):
+            await self.cmd_keys_auto(update, " ".join(args[1:]))
+            return
+
+        if sub in ("sumber", "capacity"):
+            await self._keys_sources(update)
+            return
+
         pool = getattr(self.gateway, "key_pool", None)
         if pool is None:
             await update.message.reply_text("Key pool belum aktif.")
@@ -622,10 +851,32 @@ class TelegramBot:
         lines += pool.status_lines()
         lines += [
             "",
-            "*Tambah key:*",
-            "`/keys add gemini AIza...` — langsung dipakai, tanpa restart",
-            "`/keys login gemini` — link login + cara dapat key",
-            "`/keys login` — daftar semua provider",
+            "*Cara nambah key:*",
+            "`/keys auto gemini` — aku ambil sendiri (butuh login dulu)",
+            "`/keys add gemini AIza...` — kamu kirim manual",
+            "`/login <url>` — login sekali, aku simpan sesinya",
+            "`/keys sumber` — dari mana saja key bisa didapat",
+            "`/keys login gemini` — link + cara dapat key",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _keys_sources(self, update: Update) -> None:
+        """Show where more keys come from and how much each provider gives."""
+        from app.llm.capacity import CAPACITY, total_daily_tokens
+
+        lines = ["🔑 *Sumber key & kapasitas*", ""]
+        for name, cap in CAPACITY.items():
+            lines.append(
+                f"*{name}* — ~{cap.rough_daily_tokens:,} token/hari, "
+                f"sampai {cap.keys_per_account} key\n{cap.daily_note}"
+            )
+        lines += [
+            "",
+            f"Total kalau semua dipakai: *~{total_daily_tokens():,} token/hari*.",
+            "",
+            "Cara nambah tanpa capek:",
+            "1. `/login <url konsol>` — sekali per situs",
+            "2. `/keys auto <provider>` — aku ambil key-nya sendiri",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 

@@ -515,3 +515,123 @@ def test_empty_completion_is_retried_not_returned(monkeypatch):
     )
     assert result.text == "halo"
     assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Self-service key acquisition: profiles, permissions, harvesting, capacity.
+# ---------------------------------------------------------------------------
+
+def test_host_extracted_from_url():
+    from app.services.browser_session import host_from_url
+
+    assert host_from_url("https://console.groq.com/keys") == "console.groq.com"
+    assert host_from_url("http://127.0.0.1:8899/keys") == "127.0.0.1"
+    assert host_from_url("console.groq.com/keys") == "console.groq.com"
+
+
+def test_site_permission_is_asked_once_then_remembered(tmp_path):
+    """The user asked not to be re-prompted for a site already allowed."""
+    from app.services.browser_session import SitePermissions
+
+    perms = SitePermissions(tmp_path / "perms.json")
+    assert not perms.is_allowed("console.groq.com")
+    assert not perms.is_known("console.groq.com")
+
+    perms.remember("console.groq.com", True)
+    assert perms.is_allowed("console.groq.com")
+    assert "console.groq.com" in perms.allowed_hosts()
+
+    # Survives a restart.
+    reloaded = SitePermissions(tmp_path / "perms.json")
+    assert reloaded.is_allowed("console.groq.com")
+
+    perms.remember("evil.example", False)
+    assert not reloaded.__class__(tmp_path / "perms.json").is_allowed("evil.example")
+
+
+def test_browser_profile_persists_and_can_be_wiped(tmp_path):
+    from app.services.browser_session import BrowserProfiles
+
+    profiles = BrowserProfiles(tmp_path / "browser_profiles")
+    assert not profiles.has_profile(7)
+
+    (profiles.profile_dir(7) / "Cookies").write_text("x")
+    assert profiles.has_profile(7)
+    assert profiles.wipe(7)
+    assert not profiles.has_profile(7)
+
+
+def test_create_key_button_matches_across_provider_wording():
+    from app.services.key_harvester import CREATE_PATTERNS
+    import re
+
+    samples = [
+        "Create new secret key",
+        "Create API Key",
+        "Create new key",
+        "Generate new token",
+    ]
+    for text in samples:
+        assert any(re.search(p, text, re.I) for p in CREATE_PATTERNS), text
+
+
+def test_login_wall_detection_patterns():
+    from app.services.key_harvester import LOGIN_WALL_PATTERNS
+    import re
+
+    for text in ("Sign in", "Log in", "Continue with Google", "Masuk"):
+        assert any(re.search(p, text, re.I) for p in LOGIN_WALL_PATTERNS), text
+
+
+def test_key_regex_extracts_each_provider_shape():
+    """The scraper must find the key in whatever element the page uses."""
+    import re
+
+    from app.services.key_harvester import KEY_SHAPE
+
+    cases = {
+        "gemini": "AIza" + "a" * 35,
+        "groq": "gsk_" + "b" * 40,
+        "openrouter": "sk-or-v1-" + "c" * 40,
+        "hf": "hf_" + "d" * 30,
+    }
+    for provider, key in cases.items():
+        blob = f"Your new key: {key} (copy it now)"
+        match = re.search(KEY_SHAPE[provider], blob)
+        assert match and match.group(0) == key, provider
+
+
+def test_exhausted_reports_only_fully_benched_providers():
+    from app.llm.key_pool import KeyPool, KeyState
+
+    pool = KeyPool(state_file=None, cooldown_seconds=60)
+    pool.states["groq"] = [
+        KeyState(provider="groq", slot=1, key="gsk_" + "a" * 40),
+        KeyState(provider="groq", slot=2, key="gsk_" + "b" * 40),
+    ]
+    pool.states["gemini"] = [KeyState(provider="gemini", slot=1, key="AIza" + "c" * 35)]
+
+    assert pool.exhausted() == []
+
+    pool.states["gemini"][0].cooldown_until = __import__("time").time() + 300
+    assert pool.exhausted() == ["gemini"]
+    assert pool.soonest_ready("gemini") > 0
+    assert pool.soonest_ready("groq") == 0
+
+
+def test_capacity_numbers_are_plausible():
+    from app.llm.capacity import CAPACITY, total_daily_tokens
+
+    assert total_daily_tokens() > 1_000_000
+    for name, cap in CAPACITY.items():
+        assert cap.keys_per_account >= 1, name
+        assert cap.rough_daily_tokens > 0, name
+        assert cap.daily_note, name
+
+
+def test_acquire_message_names_the_console_and_the_command():
+    from app.llm.capacity import acquire_message
+
+    text = acquire_message("gemini", "https://aistudio.google.com/apikey")
+    assert "https://aistudio.google.com/apikey" in text
+    assert "/keys add gemini" in text

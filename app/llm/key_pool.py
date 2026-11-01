@@ -174,6 +174,29 @@ class KeyPool:
                     out.append(f"✅ `{state.label()}` {state.mask()} — aktif, {state.uses} pakai")
         return out or ["Belum ada key tambahan di pool."]
 
+    def exhausted(self) -> list[str]:
+        """Providers whose every key is cooling down right now.
+
+        When this is non-empty the bot has no working key for that provider, so
+        it can tell the user exactly which console to open instead of failing
+        with a generic error.
+        """
+        out: list[str] = []
+        for provider, states in self.states.items():
+            if states and all(state.cooling for state in states):
+                out.append(provider)
+        return sorted(out)
+
+    def soonest_ready(self, provider: str) -> int:
+        """Seconds until this provider has a usable key again (0 if now)."""
+        states = self.states.get(provider) or []
+        if not states:
+            return 0
+        now = time.time()
+        if any(not state.cooling for state in states):
+            return 0
+        return max(1, int(min(state.cooldown_until for state in states) - now))
+
 
 def build_key_pool(settings, state_file: Path | None = None) -> KeyPool:
     return KeyPool.from_settings(settings, state_file=state_file)

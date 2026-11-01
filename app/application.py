@@ -62,7 +62,8 @@ class Application:
             BotCommand("pikir", "Analisis mendalam"),
             BotCommand("belajar", "Cari & simpan pengetahuan"),
             BotCommand("memori", "Statistik memori & token"),
-            BotCommand("keys", "Status key pool & quota"),
+            BotCommand("keys", "Key pool: status, add, auto, sumber"),
+            BotCommand("login", "Login sekali ke situs provider"),
             BotCommand("buat_gambar", "Generate gambar"),
             BotCommand("edit_gambar", "Edit gambar terakhir"),
             BotCommand("buat_video", "Buat video"),
@@ -131,7 +132,24 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     scheduler = SchedulerService(store, settings, notifier=notifier)
     orchestrator.scheduler = scheduler
 
-    bot = TelegramBot(settings=settings, store=store, orchestrator=orchestrator, scheduler=scheduler)
+    # Browser profile + key harvester: lets /login store a session once, and
+    # /keys auto fetch a fresh key from a console the user is signed into.
+    from app.services.browser_session import build_profiles
+    from app.services.key_harvester import build_harvester
+
+    profiles = build_profiles(settings)
+    harvester = build_harvester(
+        settings, profiles=profiles, outputs_dir=settings.outputs_path
+    )
+
+    bot = TelegramBot(
+        settings=settings,
+        store=store,
+        orchestrator=orchestrator,
+        scheduler=scheduler,
+        profiles=profiles,
+        harvester=harvester,
+    )
 
     telegram_app = None
     if with_telegram and settings.telegram_bot_token:
@@ -210,6 +228,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
+    app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))
