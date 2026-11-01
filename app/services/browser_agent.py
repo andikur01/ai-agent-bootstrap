@@ -150,12 +150,28 @@ def parse_action(payload: Any) -> Action:
 class BrowserAgent:
     """Drives a real Chromium page under the model's direction."""
 
-    def __init__(self, settings, *, gateway, outputs_dir: Path, max_steps: int | None = None):
+    def __init__(
+        self,
+        settings,
+        *,
+        gateway,
+        outputs_dir: Path,
+        max_steps: int | None = None,
+        profiles=None,
+        vault=None,
+        live_view=None,
+    ):
         self.settings = settings
         self.gateway = gateway
         self.outputs = Path(outputs_dir)
         (self.outputs / "browser").mkdir(parents=True, exist_ok=True)
         self.max_steps = max_steps or int(getattr(settings, "browser_max_steps", DEFAULT_STEPS))
+        # The saved session and the shared display. Without them this agent can
+        # only read public pages: it cannot see anything behind a login, and the
+        # user cannot watch or take over when a captcha appears.
+        self.profiles = profiles
+        self.vault = vault
+        self.live_view = live_view
 
     # ------------------------------------------------------------------ run
     async def run(
@@ -174,17 +190,18 @@ class BrowserAgent:
 
         budget = max_steps or self.max_steps
         run = BrowserRun(ok=False)
+        await self._prepare_display()
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            context = await self._context(pw, user_id)
             try:
-                context = await browser.new_context(
-                    viewport={"width": 1440, "height": 900}, locale="id-ID"
-                )
-                page = await context.new_page()
+                page = context.pages[0] if context.pages else await context.new_page()
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 except Exception as exc:  # noqa: BLE001
                     return BrowserRun(False, error=f"Gagal buka {url}: {str(exc)[:200]}")
+
+                # A saved login turns a wall into a page the agent can work with.
+                await self._maybe_sign_in(page, url, progress=progress)
 
                 history = [f"Tugas: {task}"]
                 for step in range(1, budget + 1):
@@ -223,12 +240,103 @@ class BrowserAgent:
                 run.screenshots.append(final.screenshot)
                 if run.ok and not run.answer.strip():
                     run.answer = final.text[:1500]
-                await context.close()
             finally:
-                await browser.close()
+                try:
+                    await context.close()
+                except Exception:  # noqa: BLE001
+                    pass
         return run
 
     # -------------------------------------------------------------- internals
+    async def _prepare_display(self) -> None:
+        """Point DISPLAY at the shared screen, before Playwright starts.
+
+        Playwright's driver reads the environment once and hands it to every
+        browser it spawns, so this has to happen before ``async_playwright()``.
+        Doing it means the user can watch the agent work, and - more importantly
+        - can take over the same screen when a site asks for a captcha.
+        """
+        if self.live_view is None:
+            return
+        try:
+            state = await self.live_view.ensure()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("no shared display for the browser agent: %s", exc)
+            return
+        if state.running and state.display:
+            import os
+
+            os.environ["DISPLAY"] = state.display
+
+    async def _context(self, pw, user_id: int):
+        """Open the browser with the user's saved session, if there is one.
+
+        A fresh incognito context is fine for reading a public page, but it is
+        useless for anything behind a login - the agent would hit the wall and
+        have nothing to sign in with. Reusing the profile keeps the session the
+        user established once, and headful keeps it on the shared display.
+        """
+        headful = False
+        if self.live_view is not None:
+            try:
+                state = await self.live_view.ensure()
+                headful = bool(state.running)
+            except Exception:  # noqa: BLE001
+                headful = False
+
+        if self.profiles is not None:
+            profile = self.profiles.profile_dir(user_id)
+            return await pw.chromium.launch_persistent_context(
+                str(profile),
+                headless=not headful,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                viewport={"width": 1440, "height": 900},
+                locale="id-ID",
+            )
+
+        browser = await pw.chromium.launch(
+            headless=not headful, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        return await browser.new_context(
+            viewport={"width": 1440, "height": 900}, locale="id-ID"
+        )
+
+    async def _maybe_sign_in(self, page, url: str, *, progress=None) -> bool:
+        """Sign in with a saved account when the page is a login wall.
+
+        This is what makes 'buka akun aku dan kerjakan ini' possible: the agent
+        reads the site, notices it is asking for a login, and answers with the
+        account the user saved instead of stopping.
+        """
+        if self.vault is None:
+            return False
+        try:
+            from app.services.browser_session import host_from_url
+
+            host = host_from_url(url)
+        except Exception:  # noqa: BLE001
+            return False
+        if self.vault.get(host) is None:
+            return False
+
+        try:
+            from app.services.key_harvester import KeyHarvester
+
+            helper = KeyHarvester(
+                self.settings,
+                profiles=self.profiles,
+                outputs_dir=self.outputs,
+                vault=self.vault,
+            )
+            if not await helper._login_wall(page):
+                return False
+            if progress:
+                await progress(10, f"Login sendiri pakai akun tersimpan ({host})...")
+            return await helper.sign_in_with_saved_account(page, host, progress=progress)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("saved-account sign-in skipped: %s", exc)
+            return False
+
     async def _observe(self, page, step: int) -> Observation:
         try:
             url = page.url

@@ -1038,3 +1038,95 @@ def test_auto_order_puts_the_generous_free_tiers_first():
     names = _provider_names_for_auto()
     assert names[0] == "gemini", "Gemini has the most generous free tier"
     assert "groq" in names
+
+
+# ---------------------------------------------------------------------------
+# The browser agent must be able to work behind a login, not just read public
+# pages. Without the saved session it hits the wall and has nothing to sign in
+# with, which made "buka akunku dan kerjakan ini" impossible.
+# ---------------------------------------------------------------------------
+
+
+def test_browser_agent_accepts_a_saved_session_and_display():
+    import inspect
+
+    from app.services.browser_agent import BrowserAgent
+
+    params = inspect.signature(BrowserAgent.__init__).parameters
+    assert "profiles" in params, "needs the profile dir to reuse the session"
+    assert "vault" in params, "needs saved accounts to sign in on its own"
+    assert "live_view" in params, "needs the display so the user can watch/take over"
+
+
+def test_orchestrator_passes_them_through():
+    import inspect
+
+    from app.core.orchestrator import Orchestrator
+
+    params = inspect.signature(Orchestrator.__init__).parameters
+    assert "profiles" in params
+    assert "vault" in params
+    assert "live_view" in params
+
+
+@pytest.mark.asyncio
+async def test_browser_agent_signs_in_when_it_meets_a_login_wall(tmp_path):
+    """A page behind a login must be entered with the saved account."""
+    from app.services.account_vault import AccountVault
+    from app.services.browser_agent import BrowserAgent
+
+    vault = AccountVault(tmp_path / "accounts.json")
+    vault.put("example.com", "aku@example.com", "rahasia")
+
+    agent = BrowserAgent.__new__(BrowserAgent)
+    agent.vault = vault
+    agent.profiles = None
+    agent.settings = None
+    agent.outputs = tmp_path
+
+    calls = {"signed": 0}
+
+    class WallPage:
+        url = "https://example.com/login"
+
+        async def inner_text(self, _selector):
+            return "Please log in to continue"
+
+    # Replace the harvester helper with one that records the attempt.
+    import app.services.key_harvester as kh
+
+    original = kh.KeyHarvester.sign_in_with_saved_account
+
+    async def fake_sign_in(self, page, host, *, progress=None):
+        calls["signed"] += 1
+        return True
+
+    kh.KeyHarvester.sign_in_with_saved_account = fake_sign_in
+    try:
+        ok = await agent._maybe_sign_in(WallPage(), "https://example.com/login")
+    finally:
+        kh.KeyHarvester.sign_in_with_saved_account = original
+
+    assert ok is True
+    assert calls["signed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_browser_agent_does_not_sign_in_without_a_saved_account(tmp_path):
+    from app.services.account_vault import AccountVault
+    from app.services.browser_agent import BrowserAgent
+
+    vault = AccountVault(tmp_path / "accounts.json")  # empty
+    agent = BrowserAgent.__new__(BrowserAgent)
+    agent.vault = vault
+    agent.profiles = None
+    agent.settings = None
+    agent.outputs = tmp_path
+
+    class WallPage:
+        url = "https://example.com/login"
+
+        async def inner_text(self, _selector):
+            return "Please log in"
+
+    assert await agent._maybe_sign_in(WallPage(), "https://example.com/login") is False

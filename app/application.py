@@ -115,6 +115,17 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     )
     await cache.init()
 
+    # Built before the orchestrator so the browser agent can be given the saved
+    # session and the shared display: without them it can only read public pages.
+    from app.services.account_vault import build_vault
+    from app.services.browser_session import build_profiles
+    from app.services.key_harvester import build_harvester
+    from app.services.live_view import build_live_view
+
+    profiles = build_profiles(settings)
+    live_view = build_live_view(settings)
+    vault = build_vault(settings)
+
     orchestrator = Orchestrator(
         settings=settings,
         store=store,
@@ -122,6 +133,9 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         memory=memory,
         cache=cache,
         budget=budget,
+        profiles=profiles,
+        vault=vault,
+        live_view=live_view,
     )
 
     async def notifier(chat_id: int, text: str) -> None:
@@ -133,16 +147,6 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     scheduler = SchedulerService(store, settings, notifier=notifier)
     orchestrator.scheduler = scheduler
 
-    # Browser profile + key harvester: lets /login store a session once, and
-    # /keys auto fetch a fresh key from a console the user is signed into.
-    from app.services.account_vault import build_vault
-    from app.services.browser_session import build_profiles
-    from app.services.key_harvester import build_harvester
-    from app.services.live_view import build_live_view
-
-    profiles = build_profiles(settings)
-    live_view = build_live_view(settings)
-    vault = build_vault(settings)
     harvester = build_harvester(
         settings, profiles=profiles, outputs_dir=settings.outputs_path, vault=vault
     )

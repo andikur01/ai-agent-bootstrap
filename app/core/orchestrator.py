@@ -130,6 +130,9 @@ class Orchestrator:
         cache,
         budget,
         scheduler=None,
+        profiles=None,
+        vault=None,
+        live_view=None,
     ):
         self.settings = settings
         self.store = store
@@ -138,6 +141,9 @@ class Orchestrator:
         self.cache = cache
         self.budget = budget
         self.scheduler = scheduler
+        self.profiles = profiles
+        self.vault = vault
+        self.live_view = live_view
 
         outputs = settings.outputs_path
         self.images = ImageService(settings, outputs_dir=outputs)
@@ -153,7 +159,16 @@ class Orchestrator:
         )
         self.n8n = N8nService(settings, gateway=gateway, outputs_dir=outputs)
         self.thinking = ThinkingEngine(gateway)
-        self.browser = BrowserAgent(settings, gateway=gateway, outputs_dir=outputs)
+        # The browser agent gets the saved session and the shared display, so it
+        # can work behind a login and the user can watch or take over.
+        self.browser = BrowserAgent(
+            settings,
+            gateway=gateway,
+            outputs_dir=outputs,
+            profiles=profiles,
+            vault=vault,
+            live_view=live_view,
+        )
 
     # ------------------------------------------------------------------ route
     async def classify(
