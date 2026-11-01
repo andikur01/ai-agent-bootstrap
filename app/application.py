@@ -145,6 +145,23 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         settings, profiles=profiles, outputs_dir=settings.outputs_path
     )
 
+    # Bring the shared display up at boot rather than on first use. The user
+    # asked for a browser they can watch; a screen that only appears once a task
+    # happens to need it is a screen they cannot open while waiting. Failure
+    # here is logged, never fatal - the bot runs fine without a display.
+    try:
+        state = await live_view.ensure()
+        if state.running:
+            log.info(
+                "live view ready: display=%s viewer=%s",
+                state.display,
+                live_view.viewer_url() or "(LIVE_VIEW_HOST belum diset)",
+            )
+        else:
+            log.warning("live view unavailable: %s", "; ".join(state.errors) or "unknown")
+    except Exception as exc:  # noqa: BLE001 - a display must not stop the bot
+        log.warning("live view failed to start: %s", exc)
+
     bot = TelegramBot(
         settings=settings,
         store=store,

@@ -8,14 +8,17 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
 # System deps: ffmpeg for all media work, cairo/pango for Manim,
-# espeak-ng as the offline TTS fallback, fonts for subtitle and card rendering,
-# xvfb so /login can open a real browser window on a headless host.
+# espeak-ng as the offline TTS fallback, fonts for subtitle and card rendering.
+# xvfb + x11vnc + novnc + websockify are the live view stack: they let the user
+# watch and take over the agent's browser from a phone. Without all four the
+# feature silently reports itself unavailable, which is what happened on the
+# first deploy.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         pkg-config cmake build-essential \
         libcairo2-dev libpango1.0-dev \
         espeak-ng \
-        xvfb \
+        xvfb x11vnc novnc websockify x11-apps \
         fonts-dejavu-core fonts-noto-color-emoji \
         curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
