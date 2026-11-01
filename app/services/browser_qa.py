@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -158,7 +159,14 @@ class BrowserQA:
 
         report = SiteReport(url)
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            # When a live display exists the QA run is drawn on it, so the user
+            # can watch the site being tested from /live instead of only getting
+            # a screenshot at the end. Headless stays the default otherwise.
+            display = os.environ.get("DISPLAY", "")
+            browser = await pw.chromium.launch(
+                headless=not bool(display),
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
+            )
             try:
                 for name in viewports:
                     viewport = VIEWPORTS.get(name, VIEWPORTS["desktop"])

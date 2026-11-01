@@ -299,6 +299,14 @@ class Orchestrator:
         if not text.strip():
             return Outcome(text="Aku di sini. Mau bikin apa?")
 
+        # "apakah webnya sudah jadi?" is answered from the registry, in the
+        # bot's own words, before any model is asked. The model would happily
+        # invent a status, and a wrong "yes" is worse than no answer.
+        if route.args.get("ask_status"):
+            factual = await self._status_answer(user_id, text)
+            if factual is not None:
+                return Outcome(text=factual)
+
         if self.settings.semantic_cache_enabled:
             hit = await self.cache.get(user_id, text, namespace="chat")
             if hit is not None:
@@ -322,6 +330,28 @@ class Orchestrator:
             await self.cache.put(user_id, text, answer, namespace="chat")
 
         return Outcome(text=answer, tokens=result.total_tokens)
+
+    async def _status_answer(self, user_id: int, text: str) -> str | None:
+        """Answer a "is it done yet?" question from real artifact records.
+
+        Returns None when nothing relevant was ever made, so the model handles
+        it instead. Guessing is the thing to avoid here.
+        """
+        recent = await self.memory.recent_artifacts(user_id, limit=6)
+        if not recent:
+            return None
+
+        wanted = _kind_from_question(text)
+        if wanted:
+            recent = [a for a in recent if a.kind in wanted] or recent
+
+        lines = ["Iya, ini yang aku catat:", ""]
+        for artifact in recent:
+            state = "ada" if artifact.exists() else "hilang dari disk"
+            lines.append(f"- {artifact.brief()} ({state})")
+        lines.append("")
+        lines.append("Mau aku lanjutkan yang mana?")
+        return "\n".join(lines)
 
     # ----------------------------------------------------------------- think
     async def _do_think(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
@@ -830,6 +860,25 @@ Lain
 
 
 # ------------------------------------------------------------------ helpers
+def _kind_from_question(text: str) -> set[str]:
+    """Map the noun in a status question to artifact kinds."""
+    from app.memory.artifacts import KIND_AUDIO, KIND_IMAGE, KIND_N8N, KIND_VIDEO, KIND_WEB, KIND_WEB_APP
+
+    lowered = text.lower()
+    kinds: set[str] = set()
+    if "web" in lowered or "situs" in lowered or "website" in lowered:
+        kinds |= {KIND_WEB, KIND_WEB_APP}
+    if "gambar" in lowered or "foto" in lowered or "logo" in lowered:
+        kinds.add(KIND_IMAGE)
+    if "video" in lowered:
+        kinds.add(KIND_VIDEO)
+    if "audio" in lowered or "suara" in lowered or "voice" in lowered:
+        kinds.add(KIND_AUDIO)
+    if "n8n" in lowered or "workflow" in lowered:
+        kinds.add(KIND_N8N)
+    return kinds
+
+
 def _clean_prompt(text: str) -> str:
     text = re.sub(r"^\s*/\w+\s*", "", text or "")
     return text.strip()

@@ -705,3 +705,114 @@ def test_live_view_password_is_not_guessable():
 
     sample = secrets.token_urlsafe(9)
     assert len(sample) >= 12
+
+
+# ---------------------------------------------------------------------------
+# Narration vs command: the bot must not build a website because the user
+# mentioned one. This was the user's loudest complaint.
+# ---------------------------------------------------------------------------
+
+NARRATION_CASES = [
+    "saya pernah buat web tapi jangan sekarang",
+    "aku tadi bikin gambar kucing lucu",
+    "gue kemarin udah bikin sistem n8n",
+    "aku pernah bikin video, kok error?",
+]
+
+COMMAND_CASES = [
+    ("buatkan web portofolio", "web_static"),
+    ("tolong buatkan website jualan", "web_static"),
+    ("bikin web fullstack dengan login", "web_fullstack"),
+    ("perbaiki website saya yang error", "web_repair"),
+    ("buat gambar kucing", "image_create"),
+    ("lanjutkan yang tadi", "continue"),
+]
+
+QUESTION_CASES = [
+    "apakah webnya sudah jadi?",
+    "web saya sudah berhasil belum?",
+    "buat web apakah sudah jadi nih",
+    "apakah gambarnya udah ada?",
+    "apakah videonya sudah jadi?",
+]
+
+
+def test_narration_is_chat_not_a_command():
+    """Mentioning past work must never start new work."""
+    from app.core.intent import is_narration
+
+    for text in NARRATION_CASES:
+        assert is_narration(text), text
+
+
+def test_imperative_still_wins_over_a_past_marker():
+    """"aku sudah buat web, sekarang tambahkan login" is a command."""
+    from app.core.intent import is_narration
+
+    assert not is_narration("aku sudah buat web, sekarang tambahkan halaman login")
+    assert not is_narration("tolong buatkan website jualan")
+
+
+def test_question_about_work_is_detected():
+    from app.core.intent import is_question_about_work
+
+    for text in QUESTION_CASES:
+        assert is_question_about_work(text), text
+    assert not is_question_about_work("aku sudah buat web, sekarang tambahkan login")
+
+
+def test_commands_still_route_correctly_without_a_gateway():
+    """The guards must not swallow real orders."""
+    import asyncio
+
+    from app.core.intent import route_message
+
+    async def run(text):
+        return await route_message(text, gateway=None)
+
+    for text, expected in COMMAND_CASES:
+        route = asyncio.run(run(text))
+        assert route.intent.value == expected, f"{text} -> {route.intent.value}"
+
+
+def test_narration_routes_to_chat_without_a_gateway():
+    import asyncio
+
+    from app.core.intent import route_message
+
+    async def run(text):
+        return await route_message(text, gateway=None)
+
+    for text in NARRATION_CASES:
+        route = asyncio.run(run(text))
+        assert route.intent.value == "chat", f"{text} -> {route.intent.value}"
+
+
+def test_status_question_is_flagged_for_factual_answer():
+    """ask_status makes the orchestrator answer from records, not the model."""
+    import asyncio
+
+    from app.core.intent import route_message
+
+    async def run(text):
+        return await route_message(text, gateway=None)
+
+    route = asyncio.run(run("apakah webnya sudah jadi?"))
+    assert route.args.get("ask_status") is True
+
+
+def test_menu_sections_include_a_browser_group():
+    from app.bot.handlers import MENU_SECTIONS
+
+    assert "browser" in MENU_SECTIONS
+    body = MENU_SECTIONS["browser"][1]
+    for command in ("/live", "/login", "/keys"):
+        assert command in body
+
+
+def test_watchable_intents_use_enum_members():
+    from app.bot.handlers import _WATCHABLE_INTENTS
+    from app.core.intent import Intent
+
+    assert Intent.WEB_STATIC in _WATCHABLE_INTENTS
+    assert all(isinstance(i, Intent) for i in _WATCHABLE_INTENTS)

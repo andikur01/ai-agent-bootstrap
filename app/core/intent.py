@@ -224,6 +224,73 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
 ]
 
 
+def is_narration(text: str) -> bool:
+    """True when the user is *talking about* work, not asking for it.
+
+    "saya pernah buat web" / "aku tadi bikin gambar" mention an artifact but ask
+    for nothing. Treating those as commands makes the bot start a build the user
+    never wanted - the single most annoying failure mode.
+
+    The subtle part: "buat" is both "make" and "made". A past marker *before* the
+    verb makes it past tense ("pernah buat", "tadi bikin"). A strong imperative
+    ("tambahkan", "tolong") is a command no matter what precedes it, so
+    "aku sudah buat web, sekarang tambahkan login" still builds.
+    """
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    if re.search(r"\b(jangan|jgn|gausah|ga\s*usah|nggak\s+usah)\b", lowered):
+        return True
+    if re.search(r"\b(tolong|minta|coba|tambahkan|tambahin|ganti|ubah|perbaiki|lanjutkan|teruskan)\b", lowered):
+        return False
+
+    past = re.search(r"\b(pernah|tadi|kemarin|sudah|udah|barusan|sebelumnya|dulu)\b", lowered)
+    first_person = re.search(r"\b(saya|aku|gue|gua|sy)\b", lowered)
+    if not (past and first_person):
+        return False
+    # An ambiguous build verb after the past marker is describing that past act.
+    ambiguous = re.search(r"\b(buat|bikin|generate|bikinin|buatkan|bikinkan)\w*\b", lowered)
+    if ambiguous and ambiguous.start() > past.start():
+        return True
+    # No build verb at all, just reminiscing.
+    return not re.search(r"\b(buat|bikin|tolong|minta|perbaiki|edit)\b", lowered)
+
+
+def is_question_about_work(text: str) -> bool:
+    """True for "apakah webnya sudah ada?" - a question, not a build order.
+
+    These must be answered from the artifact registry, never turned into a new
+    job. "buat web apakah sudah jadi" is a question too: the noun appears but the
+    sentence still asks.
+    """
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    # "aku sudah buat web, sekarang tambahkan login" contains "sudah" but is a
+    # command. A strong imperative wins over the question markers.
+    if re.search(
+        r"\b(tambahkan|tambahin|tolong|perbaiki|ganti|ubah|buatkan|bikinkan|"
+        r"lanjutkan|teruskan|hilangkan|hapus)\b",
+        lowered,
+    ):
+        return False
+    asked = bool(
+        re.search(
+            r"\b(apakah|apa\s+sudah|sudah(kah)?|udah|berhasil|jadi\s+nggak|"
+            r"jadi\s+gak|gimana|bagaimana|mana\s+\w+nya|kok\s+\w+nya)\b",
+            lowered,
+        )
+    )
+    about = bool(
+        re.search(
+            r"\b(web|website|situs|gambar|video|audio|suara|n8n|workflow|"
+            r"sistem|file|link|deploy|hasil)\w*",
+            lowered,
+        )
+    )
+    return asked and about
+
+
 def _bare_continuation(text: str) -> bool:
     """True for a pointer with no new instruction of its own.
 
@@ -379,6 +446,13 @@ async def route_message(
     has_voice: bool = False,
     has_document: bool = False,
 ) -> Route:
+    # A question about existing work is answered from the registry, never
+    # turned into a build. "apakah webnya sudah jadi" must not start a new site.
+    if is_question_about_work(text):
+        return Route(Intent.CHAT, {"text": text, "ask_status": True}, confidence=0.8, source="question")
+    # Talking *about* past work is not a request for new work.
+    if is_narration(text):
+        return Route(Intent.CHAT, {"text": text}, confidence=0.8, source="narration")
     rule = classify_rules(text, has_photo=has_photo, has_voice=has_voice)
     if rule is not None:
         return rule

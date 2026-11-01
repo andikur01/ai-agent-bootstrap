@@ -44,6 +44,20 @@ log = get_logger(__name__)
 YES_CALLBACK = "confirm:yes"
 NO_CALLBACK = "confirm:no"
 MENU_PREFIX = "menu:"
+# Action buttons inside the menu, e.g. "menu:ask:web" - a question, not a build.
+ASK_PREFIX = "ask:"
+# Tasks long enough that watching the screen is genuinely useful.
+_WATCHABLE_INTENTS = {
+    Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR,
+    Intent.VIDEO_CREATE, Intent.BROWSE,
+}
+_ASK_TEXTS = {
+    "web": "apakah webnya sudah jadi?",
+    "gambar": "apakah gambarnya sudah jadi?",
+    "video": "apakah videonya sudah jadi?",
+    "audio": "apakah audionya sudah jadi?",
+    "n8n": "apakah workflow n8n-nya sudah jadi?",
+}
 
 # Section id -> (button label, body). Kept as plain data so the content can be
 # tested without a Telegram connection.
@@ -146,10 +160,18 @@ def menu_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
         return HELP_TEXT, menu_keyboard()
     entry = MENU_SECTIONS.get(section)
     body = entry[1] if entry else MENU_TEXT
-    back = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Kembali ke menu", callback_data=f"{MENU_PREFIX}home")]]
-    )
-    return body, back
+    rows = []
+    # One-tap "is it done?" buttons. The user asked for exactly this: ask about
+    # past work without the bot mistaking it for a new job.
+    ask_map = {
+        "web": [("🌐 Web terakhir?", "web")],
+        "creative": [("🖼️ Gambar terakhir?", "gambar"), ("🎬 Video terakhir?", "video")],
+        "automation": [("⚙️ Workflow terakhir?", "n8n")],
+    }
+    for label, key in ask_map.get(section, []):
+        rows.append([InlineKeyboardButton(label, callback_data=f"{MENU_PREFIX}{ASK_PREFIX}{key}")])
+    rows.append([InlineKeyboardButton("⬅️ Kembali ke menu", callback_data=f"{MENU_PREFIX}home")])
+    return body, InlineKeyboardMarkup(rows)
 
 
 def _args_text(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -402,8 +424,17 @@ class TelegramBot:
 
         # Menu buttons are navigation, not task confirmation - handle and return.
         if (query.data or "").startswith(MENU_PREFIX):
-            section = query.data[len(MENU_PREFIX) :]
-            body, keyboard = menu_section(section)
+            payload = query.data[len(MENU_PREFIX) :]
+            # "ask:web" style buttons ask a question about existing work, so the
+            # user gets an answer from one tap instead of typing a sentence.
+            if payload.startswith(ASK_PREFIX):
+                await query.answer()
+                question = payload[len(ASK_PREFIX) :]
+                await self._run_confirmed(
+                    update, context, Intent.CHAT, {"text": _ASK_TEXTS.get(question, question)}
+                )
+                return
+            body, keyboard = menu_section(payload)
             await query.answer()
             try:
                 await query.edit_message_text(redact(body), parse_mode="Markdown", reply_markup=keyboard)
@@ -453,6 +484,22 @@ class TelegramBot:
         task_id = await self.store.create_task(
             user_id, route.intent.value, {"text": str(route.args.get("text") or "")[:500]}
         )
+
+        # Heavy work gets a screen. The user asked to *see* progress, and these
+        # are the tasks with real waiting in them: the QA browser then renders on
+        # this display, so /live shows the site being tested while it happens.
+        if route.intent in _WATCHABLE_INTENTS and self.live_view is not None:
+            try:
+                state = await self.live_view.ensure()
+                url = self.live_view.viewer_url() if state.running else ""
+                if url:
+                    await message.reply_text(
+                        "🖥️ Kamu bisa nonton prosesnya langsung:\n"
+                        f"{url}\nPassword: `{state.password}`",
+                        parse_mode="Markdown",
+                    )
+            except Exception as exc:  # noqa: BLE001 - never block the task
+                log.debug("live view not started for task: %s", exc)
 
         reporter = ProgressReporter(
             lambda text: message.reply_text(text, parse_mode="Markdown"),
