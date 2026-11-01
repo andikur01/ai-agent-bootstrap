@@ -46,6 +46,9 @@ Alur satu pesan: `route -> resolve reference -> confirm (heavy saja) -> execute 
 - ffmpeg + browser Playwright hilang setelah environment reset. Jalankan
   `scripts/doctor.py` dulu sebelum menyalahkan kode.
 - `BrowserQA(outputs_dir: Path)` menerima path, bukan objek Settings.
+- `BrowserAgent` menandai elemen dengan `data-agent-idx` lalu mencarinya lagi
+  lewat atribut itu. Jangan ganti ke pencocokan teks: begitu dua link punya
+  label sama, aksi akan mengenai elemen yang salah.
 - Intent CONTINUE jangan sampai jatuh ke `_do_chat`; itu bug lama dan sudah diperbaiki.
 - Pollinations sering 503 saat sibuk; retry + fallback render lokal sudah ada.
 - `pip install python-telegram-bot` polos bikin startup crash di
