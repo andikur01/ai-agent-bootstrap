@@ -178,7 +178,12 @@ async def _runtime_checks(settings) -> int:
             )
             line("LLM panggilan nyata", OK, f"{result.provider}/{result.model}")
         except Exception as exc:  # noqa: BLE001
-            line("LLM panggilan nyata", MISS, str(exc)[:100])
+            # Prefer the curated user message: the raw LiteLLM text says
+            # "BadRequestError" for a rejected key, which sends people hunting
+            # for a bug in the request instead of renewing their key.
+            friendly = getattr(exc, "user_message", "")
+            detail = friendly.splitlines()[0] if friendly else str(exc)[:100]
+            line("LLM panggilan nyata", MISS, detail)
             failures += 1
     else:
         line("LLM panggilan nyata", WARN, "dilewati (tidak ada provider)")

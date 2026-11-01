@@ -37,6 +37,7 @@ semantik, memori ringkas, dan pemotongan prompt berbasis tiktoken.
 | Web static | Bikin HTML/CSS/JS modern, deploy ke Cloudflare Pages atau GitHub Pages |
 | Web fullstack | FastAPI + Supabase (login + database), deploy ke Render |
 | Web repair | Buka hasil deploy di Playwright, screenshot, cek console error, perbaiki, deploy ulang |
+| Browse | Agent buka situs sendiri: lihat elemen, klik, isi form, lalu laporkan hasilnya |
 | n8n | Bikin workflow dari deskripsi, import lewat API n8n |
 | Belajar | `/belajar <topik>` - cari di internet, rangkum, simpan permanen |
 | Link | Kirim link YouTube/TikTok/IG/artikel, bot baca isinya dan jawab pertanyaanmu |
@@ -161,6 +162,7 @@ Cukup ngobrol seperti biasa, atau pakai perintah:
 | `/jadwal` | Lihat reminder aktif |
 | `/bataljadwal <id>` | Batalkan reminder |
 | `/batal` | Batalkan konfirmasi yang menunggu |
+| `/browse <url> <tugas>` | Buka situs, klik & isi form sendiri |
 | `/admin` | Panel admin (khusus `TELEGRAM_ADMIN_USER_IDS`) |
 
 Contoh percakapan:
@@ -190,9 +192,23 @@ Bot:  🎬 <judul>
       (subtitles)
       <jawaban>
 
+Kamu: buka https://toko-contoh.com lalu cari "sepatu lari"
+Bot:  [screenshot halaman]
+      *Browser agent* selesai di https://toko-contoh.com
+      Halaman menampilkan 12 hasil untuk "sepatu lari".
+      Langkah:
+      1. type #1 'sepatu lari' -> isi kolom cari
+      2. click #2 -> tekan tombol Cari
+      3. done -> selesai
+
 Kamu: lanjutkan yang tadi
 Bot:  <melanjutkan pekerjaan yang benar, bukan chat terakhir>
 ```
+
+`/browse` menjalankan browser sungguhan: agent melihat daftar elemen yang bisa
+diklik, memilih satu aksi, menjalankannya, lalu melihat hasilnya lagi. Berguna
+untuk situs yang butuh klik atau isi form dulu sebelum datanya muncul.
+Batas langkah diatur `BROWSER_MAX_STEPS` (default 8).
 
 ---
 
@@ -299,7 +315,8 @@ ai-agent-bootstrap/
 │   └── services/
 │       ├── image_service.py   video_service.py   audio_service.py
 │       ├── web_builder.py     web_repair.py      deploy_service.py
-│       ├── browser_qa.py      search_service.py  link_service.py
+│       ├── browser_qa.py      browser_agent.py   search_service.py
+│       ├── link_service.py
 │       ├── n8n_service.py     scheduler_service.py
 │       ├── ffmpeg.py          media_qa.py        youtube_upload.py
 ├── scripts/
