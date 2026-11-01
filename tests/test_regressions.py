@@ -933,3 +933,61 @@ def test_token_estimate_is_a_range_not_a_false_precision():
         assert isinstance(value, tuple), intent
         low, high = value
         assert low < high, intent
+
+
+# ---------------------------------------------------------------------------
+# Live view: the screen the user asked for must actually come up.
+# ---------------------------------------------------------------------------
+
+
+def test_live_view_password_is_stable_across_restarts(tmp_path):
+    """A password that changes on restart has to be re-copied every time."""
+    from app.services.live_view import LiveViewService
+
+    class FakeSettings:
+        live_view_port = 12001
+        live_view_host = "https://example.test"
+        data_dir = str(tmp_path)
+
+    first = LiveViewService(FakeSettings())._resolve_password()
+    second = LiveViewService(FakeSettings())._resolve_password()
+    assert first == second
+    assert len(first) >= 8
+    assert (tmp_path / "live_view_password").exists()
+
+
+def test_live_view_password_honours_the_env_override(tmp_path, monkeypatch):
+    from app.services.live_view import LiveViewService
+
+    class FakeSettings:
+        live_view_port = 12001
+        live_view_host = "https://example.test"
+        data_dir = str(tmp_path)
+
+    monkeypatch.setenv("LIVE_VIEW_PASSWORD", "rahasia-pilihan-sendiri")
+    assert LiveViewService(FakeSettings())._resolve_password() == "rahasia-pilihan-sendiri"
+
+
+def test_live_view_password_file_is_not_world_readable(tmp_path):
+    from app.services.live_view import LiveViewService
+
+    class FakeSettings:
+        live_view_port = 12001
+        live_view_host = "https://example.test"
+        data_dir = str(tmp_path)
+
+    LiveViewService(FakeSettings())._resolve_password()
+    mode = (tmp_path / "live_view_password").stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+
+
+def test_viewer_url_is_empty_without_a_configured_host():
+    """Better no link than a link to localhost the phone cannot reach."""
+    from app.services.live_view import LiveViewService
+
+    class FakeSettings:
+        live_view_port = 12001
+        live_view_host = ""
+        data_dir = "/tmp"
+
+    assert LiveViewService(FakeSettings()).viewer_url() == ""

@@ -124,7 +124,7 @@ class LiveViewService:
         self.state.display = display
         os.environ["DISPLAY"] = display
 
-        self.state.password = secrets.token_urlsafe(9)
+        self.state.password = self._resolve_password()
         pw_file = Path("/tmp/.agent_vnc_pass")
         pw_file.write_text(self.state.password)
         pw_file.chmod(0o600)
@@ -143,6 +143,41 @@ class LiveViewService:
             self.state.vnc_port,
             self.state.web_port,
         )
+
+    def _resolve_password(self) -> str:
+        """Reuse the saved VNC password so the user only copies it once.
+
+        A fresh password on every restart meant the user had to re-read it from
+        Telegram each time they restarted the bot - which is most of the point
+        of having a screen. The value lives in a gitignored file under the data
+        directory, and is still random when first generated.
+        """
+        env_password = os.environ.get("LIVE_VIEW_PASSWORD", "").strip()
+        if env_password:
+            return env_password
+        stored = Path(self._password_file())
+        try:
+            if stored.exists():
+                saved = stored.read_text().strip()
+                if saved:
+                    return saved
+        except OSError:
+            pass
+        password = secrets.token_urlsafe(9)
+        try:
+            stored.parent.mkdir(parents=True, exist_ok=True)
+            stored.write_text(password)
+            stored.chmod(0o600)
+        except OSError:
+            pass
+        return password
+
+    def _password_file(self) -> str:
+        data_dir = ""
+        if self.settings is not None:
+            data_dir = getattr(self.settings, "data_dir", "") or ""
+        data_dir = data_dir or os.environ.get("DATA_DIR", "data")
+        return str(Path(data_dir) / "live_view_password")
 
     async def _start_xvfb(self) -> str:
         for number in range(99, 130):
