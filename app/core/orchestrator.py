@@ -637,12 +637,33 @@ class Orchestrator:
             meta={"task": task, "steps": run.steps[:10], "ok": run.ok},
         )
         shots = [s for s in run.screenshots if s][-2:]
+        produced, note = self._collect_download()
+        text_out += note
         return Outcome(
             text=text_out,
             url=url,
+            files=produced,
             milestone_screenshots=shots,
             tokens=TOKEN_ESTIMATES.get(Intent.THINK, 3000),
         )
+
+    def _collect_download(self) -> tuple[list[str], str]:
+        """Take the file the browser agent downloaded, if there is one.
+
+        A tool site - the kind that makes video or images - ends by handing the
+        user a download. That file *is* the result, so returning only a summary
+        would leave the user with nothing usable. Clearing it afterwards stops
+        the same file being sent twice.
+        """
+        downloaded = getattr(self.browser, "downloaded", None)
+        if downloaded is None:
+            return [], ""
+        path = Path(downloaded)
+        if not path.exists():
+            self.browser.downloaded = None
+            return [], ""
+        self.browser.downloaded = None
+        return [str(path)], f"\n\n📥 Hasil: `{path.name}`"
 
     async def _web_outcome(self, user_id: int, shipped, request: str, kind: str = KIND_WEB) -> Outcome:
         location = shipped.deployment.url if shipped.deployment else str(shipped.project.root)

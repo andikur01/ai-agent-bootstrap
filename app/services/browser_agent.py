@@ -80,7 +80,7 @@ class Observation:
 
 @dataclass
 class Action:
-    kind: str  # click | type | goto | scroll | back | wait | done
+    kind: str  # click | type | goto | scroll | back | wait | download | done
     index: int = 0
     text: str = ""
     url: str = ""
@@ -99,7 +99,9 @@ class BrowserRun:
 
 _ACTION_SCHEMA = """Balas HANYA JSON, satu aksi per langkah:
 {"action":"click","index":3,"reason":"buka menu login"}
+{"action":"click","index":4,"reason":"tunggu hasil render"}
 {"action":"type","index":2,"text":"halo","reason":"isi pencarian"}
+{"action":"download","index":7,"reason":"unduh hasil video/gambar"}
 {"action":"goto","url":"https://...","reason":"pindah halaman"}
 {"action":"scroll","reason":"lihat bawah halaman"}
 {"action":"back","reason":"kembali"}
@@ -130,7 +132,7 @@ def parse_action(payload: Any) -> Action:
         return Action("done", reason="format tidak dikenali")
 
     kind = str(payload.get("action") or payload.get("kind") or "done").strip().lower()
-    if kind not in {"click", "type", "goto", "scroll", "back", "wait", "done"}:
+    if kind not in {"click", "type", "goto", "scroll", "back", "wait", "download", "done"}:
         kind = "done"
     index = payload.get("index", 0)
     try:
@@ -172,6 +174,8 @@ class BrowserAgent:
         self.profiles = profiles
         self.vault = vault
         self.live_view = live_view
+        # Set when the agent downloads a produced file, so the caller can send it.
+        self.downloaded: Path | None = None
 
     # ------------------------------------------------------------------ run
     async def run(
@@ -467,9 +471,47 @@ class BrowserAgent:
             if action.kind == "type":
                 await handle.fill(action.text, timeout=8000)
                 return f"isi {target.label!r} dengan {action.text!r}"
+            if action.kind == "download":
+                return await self._download(page, handle, target)
             return f"aksi {action.kind} tidak dikenal"
         except Exception as exc:  # noqa: BLE001
             return f"gagal: {str(exc)[:160]}"
+
+    async def _download(self, page, handle, target: Element) -> str:
+        """Click something that produces a file, and keep the file.
+
+        A tool site - the kind that makes video or images - ends by handing the
+        user a download. Without this the agent can reach the final page and then
+        have nothing: the result would be a filename in a browser it cannot see
+        afterwards. Anything it produces goes to outputs/browser/downloads so it
+        can be sent on to Telegram.
+        """
+        target_dir = self.outputs / "browser" / "downloads"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            async with page.expect_download(timeout=60000) as info:
+                await handle.click(timeout=8000)
+            download = await info.value
+            suggested = download.suggested_filename or "unduhan"
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "-", suggested)[:80] or "unduhan"
+            destination = target_dir / safe
+            await download.save_as(str(destination))
+            size = destination.stat().st_size if destination.exists() else 0
+            if size == 0:
+                return f"unduhan {safe} kosong"
+            self.downloaded = destination
+            return f"terunduh {safe} ({size} bytes) ke {destination}"
+        except Exception as exc:  # noqa: BLE001
+            # Many sites open the file in a new tab instead of downloading it.
+            # Fall back to reading the URL the click produced.
+            try:
+                async with page.context.expect_page(timeout=15000) as info:
+                    await handle.click(timeout=8000)
+                new_page = await info.value
+                await new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+                return f"terbuka tab baru: {new_page.url}"
+            except Exception:  # noqa: BLE001
+                return f"gagal mengunduh: {str(exc)[:120]}"
 
     async def _locator(self, page, target: Element):
         """Re-find the element by the tag we stamped during the last scan."""

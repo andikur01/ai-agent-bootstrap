@@ -1130,3 +1130,48 @@ async def test_browser_agent_does_not_sign_in_without_a_saved_account(tmp_path):
             return "Please log in"
 
     assert await agent._maybe_sign_in(WallPage(), "https://example.com/login") is False
+
+
+def test_browser_agent_can_download_a_produced_file():
+    """A tool site ends by handing over a file. Without a download action the
+    agent reaches the final page and has nothing to send."""
+    from app.services.browser_agent import _ACTION_SCHEMA, parse_action
+
+    assert '"action":"download"' in _ACTION_SCHEMA
+    action = parse_action('{"action":"download","index":7,"reason":"unduh hasil"}')
+    assert action.kind == "download"
+    assert action.index == 7
+
+
+def test_a_downloaded_file_becomes_the_deliverable(tmp_path):
+    """The file, not just a summary, must reach the user."""
+    from app.core.orchestrator import Orchestrator
+
+    produced = tmp_path / "hasil.mp4"
+    produced.write_bytes(b"x" * 128)
+
+    class FakeBrowser:
+        downloaded = produced
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.browser = FakeBrowser()
+
+    files, note = orch._collect_download()
+    assert files == [str(produced)]
+    assert "hasil.mp4" in note
+    assert orch.browser.downloaded is None, "must not be sent twice"
+
+    # Nothing downloaded: no file, no note.
+    orch.browser.downloaded = None
+    assert orch._collect_download() == ([], "")
+
+
+def test_a_missing_download_is_not_reported(tmp_path):
+    from app.core.orchestrator import Orchestrator
+
+    class FakeBrowser:
+        downloaded = tmp_path / "sudah-dihapus.mp4"
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.browser = FakeBrowser()
+    assert orch._collect_download() == ([], "")
