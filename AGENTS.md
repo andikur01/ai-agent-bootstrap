@@ -113,3 +113,30 @@ asyncio.run(m())"
 
 Keys live in `.env` only, which is gitignored. `/keys add <provider> <key>` in
 Telegram validates, stores and activates a key without a restart.
+
+## Self-service keys: what is possible and what is not
+
+Providers expose no API for creating API keys. Automating account *signup* is
+what gets accounts banned, so the bot never does it. The split that works:
+
+* The human signs in once, in a real browser (`/login <url>`), including 2FA and
+  captcha. The password never reaches the bot.
+* The bot drives that saved session afterwards (`/keys auto <provider>`): open
+  the console, click the create-key button, scrape the key, verify it, store it.
+
+**DISPLAY must be set before `async_playwright()` starts.** The Playwright driver
+reads its environment once and hands it to every browser it spawns. Setting
+`os.environ["DISPLAY"]` after `async_playwright()` has begun silently does
+nothing, and Chromium dies with "Missing X server or $DISPLAY". `_ensure_display()`
+is therefore called *before* the `async with`.
+
+**A stale X socket lies.** A crashed Xvfb leaves `/tmp/.X11-unix/X<n>` behind.
+Reusing that display fails; skip any number whose socket already exists and let
+Xvfb take a fresh one. Confirm readiness by waiting for the socket to appear, not
+by trusting `proc.returncode is None`.
+
+**Headless hosts cannot host an interactive login.** Xvfb gives the browser
+somewhere to run, and the bot can screenshot it, but the user has no window to
+type into. On such a host the practical path is `/keys add <provider> <key>`
+(created in the user's own browser). `/login` + `/keys auto` is fully automatic
+only where a window can be seen - the user's own machine, or a VPS with VNC.
