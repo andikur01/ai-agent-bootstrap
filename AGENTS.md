@@ -135,8 +135,27 @@ Reusing that display fails; skip any number whose socket already exists and let
 Xvfb take a fresh one. Confirm readiness by waiting for the socket to appear, not
 by trusting `proc.returncode is None`.
 
-**Headless hosts cannot host an interactive login.** Xvfb gives the browser
-somewhere to run, and the bot can screenshot it, but the user has no window to
-type into. On such a host the practical path is `/keys add <provider> <key>`
-(created in the user's own browser). `/login` + `/keys auto` is fully automatic
-only where a window can be seen - the user's own machine, or a VPS with VNC.
+**A headless host still has a window, if you build one.** Xvfb alone gives the
+browser somewhere to run but the user nowhere to type. The fix is the rest of the
+stack: x11vnc shares that display, websockify serves noVNC over the published
+port, and the user opens the viewer URL from their phone. Then `/login` works
+exactly as it does on a desktop, and `/keys auto` can run unattended afterwards.
+
+This was missed for a long time because the four OS packages were never
+installed, so `live_view.ensure()` reported the stack unavailable and the failure
+looked like a code bug. `scripts/setup_system.sh` installs and verifies them, and
+the Dockerfile installs the same set. The display now starts at boot rather than
+on first use, because a screen that only appears once a task needs it is a screen
+the user cannot open while waiting.
+
+The VNC password is generated once and kept in the gitignored data directory, so
+it survives restarts; `LIVE_VIEW_PASSWORD` overrides it.
+
+**"Ambilkan key" is a first-class request.** The whole reason the browser and
+the harvester exist is so the user never opens a provider console. Routing that
+only through `/keys auto` defeats it, so `_parse_harvest_request` in
+`app/bot/handlers.py` recognises plain phrasing ("ambilkan key gemini",
+"ambil semua key") and sends it straight to the harvester. Account creation is
+excluded on purpose - automating signup is what gets accounts banned, so that
+stays manual. When no provider is named, try all of them and report which ones
+still need a login; a useful partial answer beats a question bounced back.
