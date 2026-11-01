@@ -135,14 +135,16 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
 
     # Browser profile + key harvester: lets /login store a session once, and
     # /keys auto fetch a fresh key from a console the user is signed into.
+    from app.services.account_vault import build_vault
     from app.services.browser_session import build_profiles
     from app.services.key_harvester import build_harvester
     from app.services.live_view import build_live_view
 
     profiles = build_profiles(settings)
     live_view = build_live_view(settings)
+    vault = build_vault(settings)
     harvester = build_harvester(
-        settings, profiles=profiles, outputs_dir=settings.outputs_path
+        settings, profiles=profiles, outputs_dir=settings.outputs_path, vault=vault
     )
 
     # Bring the shared display up at boot rather than on first use. The user
@@ -170,6 +172,7 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         profiles=profiles,
         harvester=harvester,
         live_view=live_view,
+        vault=vault,
     )
 
     telegram_app = None
@@ -249,6 +252,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
+    app.add_handler(CommandHandler("akun", bot.cmd_akun))
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))

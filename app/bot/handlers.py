@@ -267,6 +267,7 @@ class TelegramBot:
         profiles=None,
         harvester=None,
         live_view=None,
+        vault=None,
     ):
         self.settings = settings
         self.store = store
@@ -275,6 +276,7 @@ class TelegramBot:
         self.profiles = profiles
         self.harvester = harvester
         self.live_view = live_view
+        self.vault = vault or getattr(harvester, "vault", None)
         self.gate = ConfirmationGate(timeout_seconds=180)
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
         self._running: dict[int, asyncio.Task] = {}
@@ -875,6 +877,75 @@ class TelegramBot:
             parse_mode="Markdown",
         )
 
+    async def cmd_akun(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Store a login the agent may use, then delete the message holding it.
+
+        The user asked for this explicitly and owns the accounts: a throwaway
+        email, handed over once, so the agent can sign in and fetch keys without
+        the user opening a console. The password is written to a 0600 file under
+        the gitignored data directory, and the Telegram message carrying it is
+        deleted so it does not stay in the chat history.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+        if self.vault is None:
+            await update.message.reply_text("Penyimpanan akun belum aktif.")
+            return
+
+        args = list(context.args or [])
+        if not args or args[0].lower() in ("list", "daftar"):
+            saved = self.vault.describe()
+            body = "\n".join(f"• `{line}`" for line in saved) if saved else "(belum ada)"
+            await update.message.reply_text(
+                "🔐 *Akun tersimpan*\n" + body + "\n\n"
+                "Tambah: `/akun <situs> <email> <password>`\n"
+                "Hapus: `/akun hapus <situs>`\n\n"
+                "Password disimpan lokal (0600), tidak pernah masuk log atau git.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if args[0].lower() in ("hapus", "delete", "forget"):
+            if len(args) < 2:
+                await update.message.reply_text("Pakai: `/akun hapus <situs>`", parse_mode="Markdown")
+                return
+            gone = self.vault.forget(args[1])
+            await update.message.reply_text(
+                "Sudah aku hapus." if gone else f"Tidak ada akun untuk `{args[1]}`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if len(args) < 3:
+            await update.message.reply_text(
+                "Pakai: `/akun <situs> <email> <password>`\n\n"
+                "Contoh:\n`/akun google.com akunsaya@gmail.com rahasia123`\n\n"
+                "Aku pakai untuk login sendiri saat ambil key. "
+                "Pesannya aku hapus setelah tersimpan.",
+                parse_mode="Markdown",
+            )
+            return
+
+        host = args[0].lower().strip().strip("<>")
+        email = args[1]
+        password = " ".join(args[2:])
+
+        # Delete first: the message holds a password, and a failure to store is
+        # better than a password left sitting in the chat history.
+        try:
+            await update.message.delete()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not delete the password message: %s", exc)
+
+        account = self.vault.put(host, email, password)
+        await update.message.reply_text(
+            f"🔐 Tersimpan untuk `{account.host}`: {account.email}\n"
+            f"Password: `{account.masked_password()}`\n\n"
+            "Sekarang aku bisa login sendiri ke situs itu. "
+            "Kalau ada captcha, aku minta kamu selesaikan di layar live view.",
+            parse_mode="Markdown",
+        )
+
     async def cmd_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Open a real browser so the user signs in once; we keep the session.
 
@@ -898,9 +969,29 @@ class TelegramBot:
             )
             return
 
-        url = args[0]
+        url = args[0].strip().strip("<>").strip()
+        # The placeholder in the help text got typed literally and became a real
+        # navigation attempt to https://<url>. Say what is wrong instead of
+        # letting Chromium produce a protocol error the user cannot act on.
+        if not url or "<" in url or ">" in url or url.lower() in {"url", "link", "situs", "site"}:
+            await update.message.reply_text(
+                "Itu masih teks contoh, bukan link sungguhan.\n\n"
+                "Ganti `<url>` dengan alamat situsnya, contoh:\n"
+                "`/login https://aistudio.google.com/apikey`\n"
+                "`/login https://console.groq.com/keys`\n\n"
+                "Atau lebih gampang: `ambil key gemini` dan aku yang urus.",
+                parse_mode="Markdown",
+            )
+            return
         if not url.startswith("http"):
             url = "https://" + url
+        if not re.match(r"^https?://[a-z0-9.\-]+\.[a-z]{2,}(/|$|:)", url, re.I):
+            await update.message.reply_text(
+                f"`{url}` kelihatannya bukan alamat situs yang benar.\n\n"
+                "Contoh yang benar: `/login https://aistudio.google.com/apikey`",
+                parse_mode="Markdown",
+            )
+            return
         if self.harvester is None:
             await update.message.reply_text("Browser belum siap di server ini.")
             return
@@ -912,10 +1003,11 @@ class TelegramBot:
             self.profiles.permissions.remember(host, True)
 
         seconds = int(getattr(self.settings, "browser_login_seconds", 240))
+        view = await self._live_view_hint()
         status = await update.message.reply_text(
             f"🌐 Membuka browser di {host}...\n\n"
-            f"Login di jendela itu. Aku tunggu sampai {seconds} detik dan "
-            "kirim screenshot kalau perlu."
+            f"{view}\n"
+            f"Aku tunggu sampai {seconds} detik. Kalau sudah masuk, aku bilang.",
         )
 
         async def report(pct: int, text: str, screenshot=None) -> None:
@@ -923,6 +1015,12 @@ class TelegramBot:
                 await status.edit_text(f"🌐 {pct}% — {text}")
             except Exception:  # noqa: BLE001 - edits can be rate-limited
                 pass
+            if screenshot:
+                try:
+                    with open(screenshot, "rb") as handle:
+                        await update.message.reply_photo(handle, caption=text[:1000])
+                except Exception:  # noqa: BLE001
+                    pass
 
         result = await self.harvester.open_for_login(
             url, user_id=user_id, seconds=seconds, progress=report
@@ -938,8 +1036,33 @@ class TelegramBot:
         icon = "✅" if result.ok else "⚠️"
         await update.message.reply_text(
             f"{icon} {result.message}\n\n"
-            f"Kalau sudah: `/keys auto <provider>`",
+            f"Kalau sudah: `ambil key {host.split('.')[0]}`",
             parse_mode="Markdown",
+        )
+
+    async def _live_view_hint(self) -> str:
+        """Tell the user where to actually type, with the password if needed.
+
+        'Login in that window' is useless advice on a headless host: there is no
+        window on their screen. The live view URL is the window, so it has to be
+        in the message - and it is the difference between the user being able to
+        finish a login and the login silently never happening.
+        """
+        if self.live_view is None:
+            return "Login lewat browser yang sudah aku buka."
+        try:
+            state = await self.live_view.ensure()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("live view unavailable for login: %s", exc)
+            return "Login lewat browser yang sudah aku buka."
+        url = self.live_view.viewer_url() if state.running else ""
+        if not url:
+            return "Login lewat browser yang sudah aku buka."
+        return (
+            f"👉 *Buka layarnya di HP:*\n{url}\n"
+            f"Password: `{state.password}`\n\n"
+            "Di layar itu kamu lihat browsernya. Klik kolom email, ketik, "
+            "lalu klik Next. Kamu yang isi, aku tidak pernah lihat passwordnya."
         )
 
     async def cmd_keys_auto(self, update: Update, raw: str) -> None:
@@ -950,12 +1073,17 @@ class TelegramBot:
         args = raw.split()
         provider = resolve_provider(args[0]) if args else None
         if provider is None:
-            await update.message.reply_text(
-                "Pakai: `/keys auto <provider>`\n\n"
-                f"Provider: {', '.join(PROVIDERS)}\n\n"
-                "Belum login di situsnya? `/login <url>` dulu.",
-                parse_mode="Markdown",
-            )
+            if args and args[0].strip().strip("<>").lower() in {"provider", "<provider>"}:
+                await update.message.reply_text(
+                    "Itu masih teks contoh. Sebut providernya, atau aku coba "
+                    "semuanya:\n\n"
+                    f"Provider: {', '.join(PROVIDERS)}\n\n"
+                    "Contoh: `ambil key gemini` atau `ambil semua key`",
+                    parse_mode="Markdown",
+                )
+                return
+            # No provider named: do all of them rather than asking again.
+            await self._keys_auto_all(update)
             return
 
         if self.harvester is None:
