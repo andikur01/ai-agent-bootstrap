@@ -1,4 +1,4 @@
-# PANDUAN KAMU — sekarang bot bisa login SENDIRI pakai akunmu
+# PANDUAN KAMU — bot bisa login sendiri DAN kerja di situs apa pun
 
 Ada 3 kabar. Satu jelek, dua bagus.
 
@@ -154,6 +154,92 @@ Password: **`CXRfAti_d6Q6`**
 
 ---
 
+## KABAR BAGUS 3: soal "1 juta token" dan situs lain
+
+### Soal token gabungan
+
+Kamu ingat aku pernah bikin prompt supaya token dari banyak AI digabung jadi
+1 juta. Itu **bukan** cara kerjanya, dan memang **nggak bisa** begitu — token
+nggak bisa ditumpuk seperti pulsa.
+
+Tapi kekhawatiranmu benar: **kalau cuma satu key, cepat habis.** Solusinya
+bukan menumpuk token, tapi **banyak key + rotasi otomatis.** Itu sudah jalan:
+
+```
+Gemini habis    -> otomatis pindah Groq
+Groq habis      -> otomatis pindah Cerebras
+Cerebras habis  -> otomatis pindah OpenRouter
+... dan seterusnya
+```
+
+Jadi praktisnya kamu nggak pernah kehabisan. Dan yang penting:
+**7 provider, bukan cuma Gemini.**
+
+| Provider | Untuk apa |
+|---|---|
+| Gemini | chat + analisa gambar |
+| Groq | chat super cepat |
+| Cerebras | chat super cepat |
+| OpenRouter | cadangan, banyak model |
+| DeepSeek | mikir berat / coding |
+| Mistral | cadangan |
+| HuggingFace | gambar (FLUX) + model khusus |
+
+Kamu kirim **satu** akun Google -> aku bisa ambil **key Gemini**. Untuk
+provider lain, aku butuh akun di situs masing-masing (atau kamu kirim key-nya
+langsung). Bilang `ambil semua key` dan aku coba semuanya.
+
+### Soal "bikin video di Flow" dan situs sejenis
+
+Tadi jawabannya **belum bisa**, dan aku sudah perbaiki. Ada 3 hal yang kurang,
+semua sudah dibenerin dan diuji:
+
+| Yang kurang | Sekarang |
+|---|---|
+| Browser agent pakai browser kosong (nggak ada login) | ✅ pakai sesi login kamu |
+| Browser agent nggak kelihatan di layar | ✅ tampil di live view, kamu bisa ambil alih |
+| Nggak bisa **mengunduh** hasil dari situs | ✅ bisa unduh, lalu aku kirim ke Telegram |
+
+**Dan satu bug routing yang berbahaya:** dulu kalau kamu bilang
+`bikin video di flow`, aku malah bikin slideshow lokal. Kelihatan seperti
+berhasil, padahal bukan yang kamu minta. Sekarang sudah benar — kalau kamu
+sebut situsnya, aku kerjakan **di situs itu.**
+
+### Situs yang sudah aku kenali namanya
+
+`flow` · `veo` · `sora` · `runway` · `pika` · `kling` · `luma` · `hailuo` ·
+`canva` · `capcut` · `figma` · `elevenlabs` · `suno` · `udio` · `midjourney` ·
+`leonardo` · `ideogram` · `chatgpt` · `gemini` · `claude` · `notion` · `gamma`
+
+Ketik saja namanya, nggak perlu alamat lengkap:
+
+```
+bikin video di flow tentang kucing
+buatkan poster di canva
+bikin lagu di suno
+```
+
+Atau pakai alamat langsung:
+
+```
+buka https://flow.google.com lalu bikin video kucing
+```
+
+### Batas jujurnya
+
+Aku bisa **buka situs, login, klik, ngetik, dan unduh hasilnya.** Tapi:
+
+- Kalau situsnya minta **captcha**, kamu yang selesaikan (aku kasih link live view)
+- Kalau situsnya pakai **antrean panjang**, aku tunggu sampai batas waktu lalu lapor
+- Kalau situsnya **ganti desain**, aku mungkin salah klik — aku lapor, bukan diam
+- Aku **nggak tahu** apakah Flow punya kuota gratis. Itu urusan akunmu
+
+**Aku nggak bisa janji 100% selalu berhasil** — situs berubah, dan itu di luar
+kendaliku. Yang aku janji: **aku nggak akan diam-diam gagal.** Kalau nggak bisa,
+aku bilang nggak bisa, dengan alasannya.
+
+---
+
 ## LANGKAH PERTAMAMU (2 menit)
 
 Kirim akun buanganmu:
@@ -166,6 +252,12 @@ Lalu:
 
 ```
 ambil semua key
+```
+
+Lalu coba:
+
+```
+bikin video di flow tentang kucing
 ```
 
 Lihat aku kerja. Kalau mentok di captcha, aku bilang — bukan diam-diam gagal.
