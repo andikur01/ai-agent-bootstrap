@@ -240,6 +240,91 @@ aku bilang nggak bisa, dengan alasannya.
 
 ---
 
+## KABAR BAGUS 4: situs APA SAJA, dan stok token yang benar-benar dihitung
+
+Kamu tanya: "kalau ada web baru yang menyediakan API key banyak, gua suruh ke
+sana, bisa ga bro?" Tadi jawabannya **belum bisa** — aku cuma kenal 7 konsol.
+Sekarang **bisa situs apa saja.**
+
+### Cari key di situs mana pun
+
+```
+ambil key di situsbaru.com
+ambil api key dari https://newkeys.io/tokens
+kasih aku key di toge.ai
+```
+
+Aku bakal: buka situsnya → login sendiri kalau ada akun tersimpan → baca semua
+key di halaman itu → **kirim nilainya ke kamu**.
+
+Lalu kamu yang putuskan:
+
+```
+simpan <key-nya>
+```
+
+**Aku nggak simpan sendiri tanpa izinmu.** Ini disengaja: kalau scraper
+langsung nulis ke `.env`, satu salah cocok bisa bikin password masuk ke slot
+kredensial. Jadi kamu lihat dulu, baru setuju.
+
+Setiap key aku **tes dulu ke providernya** sebelum disimpan. Kalau provider
+nolak, aku bilang — nggak aku simpan. Key mati di `.env` itu lebih bahaya dari
+nggak ada key, karena kelihatan seperti kapasitas yang sebenarnya nggak ada.
+
+### Stok token BENERAN, bukan karangan
+
+```
+/stok
+```
+
+Hasilnya seperti ini (contoh nyata dari server ini):
+
+```
+✅ Groq — 1 key ~500,000 token/hari | provider: key hidup
+•  Google Gemini — 0 key
+•  Cerebras — 0 key
+...
+
+Total: 1 key aktif dari 1 tersimpan.
+Perkiraan: ~500,000 token/hari.
+
+Angka token itu perkiraan dari tabel kapasitas, bukan janji provider —
+kuota gratis berubah tanpa pemberitahuan. Jumlah key-nya yang pasti.
+```
+
+**Aku pisahkan yang PASTI dan yang PERKIRAAN:**
+
+| Angka | Sifatnya |
+|---|---|
+| Jumlah key | ✅ pasti — dihitung dari yang benar-benar tersimpan |
+| Key hidup/mati | ✅ pasti — aku tanya langsung ke provider |
+| Token/hari | ⚠️ perkiraan — provider nggak pernah kasih angka pasti |
+
+Kamu bilang "bukan halusinasi, tapi beneran" — jadi yang bisa aku pastikan, aku
+pastikan. Yang nggak bisa, aku bilang nggak bisa.
+
+### Satu bug yang aku temukan sendiri
+
+Waktu aku tes, situs contohnya punya baris `Session: 7f3ab9...`. Scannernya
+**salah kira itu API key.** Kalau lolos, session id kamu bisa masuk `.env`
+sebagai key.
+
+Sudah aku perbaiki: string hex polos sekarang harus dekat kata `api key` DAN
+nggak boleh dekat kata `session`/`hash`/`cache`. Sekarang 2 key benar terbaca,
+session id ditolak. **Key salah di `.env` lebih bahaya daripada key yang
+kelewatan.**
+
+### Batas jujurnya
+
+✅ Bisa: buka situs apa saja, login sendiri, baca key, kirim nilainya
+✅ Bisa: hitung stok nyata dan cek key masih hidup atau nggak
+❌ Captcha → kamu yang selesaikan
+❌ Aku **nggak bikin akun otomatis** — itu aturan keras, bukan keterbatasan
+❌ Kalau situsnya pakai JS berat atau key-nya muncul di popup yang aneh,
+   aku mungkin kelewatan. Aku bilang kelewatan, bukan diam.
+
+---
+
 ## LANGKAH PERTAMAMU (2 menit)
 
 Kirim akun buanganmu:
