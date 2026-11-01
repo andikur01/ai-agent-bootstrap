@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
 
+    # ---------- Browser agent ----------
+    # How many observe/act steps the agent may take on one page before it stops.
+    browser_max_steps: int = 8
+
     # ---------- Search ----------
     tavily_api_key: str = ""
     searxng_base_url: str = ""

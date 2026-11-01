@@ -77,7 +77,8 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "🌐 *WEB DEVELOPMENT*\n\n"
         "`/buat_web` <deskripsi> - Website static (dites dulu, lalu dikirim)\n"
         "`/buat_web_full` <deskripsi> - Website fullstack + login + database\n"
-        "`/perbaiki_web` <link> - Perbaiki website yang error",
+        "`/perbaiki_web` <link> - Perbaiki website yang error\n"
+        "`/browse` <url> <tugas> - Buka situs & klik/isi form sendiri",
     ),
     "automation": (
         "⚙️ Automation",
@@ -569,6 +570,9 @@ class TelegramBot:
 
     async def cmd_buat_n8n(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_confirmed(update, context, Intent.N8N, {"text": _args_text(context)})
+
+    async def cmd_browse(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_confirmed(update, context, Intent.BROWSE, {"text": _args_text(context)})
 
 
     async def cmd_belajar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

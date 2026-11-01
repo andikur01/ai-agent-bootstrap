@@ -43,6 +43,7 @@ class Intent(str, Enum):
     WEB_STATIC = "web_static"
     WEB_FULLSTACK = "web_fullstack"
     WEB_REPAIR = "web_repair"
+    BROWSE = "browse"
     N8N = "n8n"
     LEARN = "learn"
     LINK_INGEST = "link_ingest"
@@ -63,6 +64,7 @@ HEAVY_INTENTS = {
     Intent.WEB_STATIC,
     Intent.WEB_FULLSTACK,
     Intent.WEB_REPAIR,
+    Intent.BROWSE,
     Intent.N8N,
     Intent.LINK_INGEST,
     Intent.LEARN,
@@ -185,6 +187,15 @@ _RULES: list[tuple[re.Pattern[str], Intent, dict]] = [
     ),
     (
         re.compile(
+            r"\b(buka|browse|jelajahi|operasikan|klik|login ke)\b.{0,40}"
+            r"(https?://|situs|website|web|halaman|akun|dashboard)",
+            re.I,
+        ),
+        Intent.BROWSE,
+        {},
+    ),
+    (
+        re.compile(
             r"\b(web\s*app|fullstack|full\s*stack|login|signup|auth|database|crud|dashboard)\b",
             re.I,
         ),
@@ -235,6 +246,14 @@ def classify_rules(text: str, *, has_photo: bool = False, has_voice: bool = Fals
         return Route(Intent.CONTINUE, {"text": stripped}, confidence=0.9)
 
     urls = URL_RE.findall(stripped)
+    # An explicit "operate this page" verb outranks plain link ingestion: the
+    # user wants the agent to click and type, not just summarise.
+    if urls and re.search(r"\b(buka|browse|jelajahi|operasikan|klik|login)\b", stripped, re.I):
+        return Route(
+            Intent.BROWSE,
+            {"text": stripped, "urls": urls},
+            confidence=0.9,
+        )
     if urls and (YT_RE.search(stripped) or len(stripped) < 300):
         return Route(
             Intent.LINK_INGEST,
@@ -286,6 +305,7 @@ CLASSIFIER_LABELS = [
     "web_static",
     "web_fullstack",
     "web_repair",
+    "browse",
     "n8n",
     "learn",
     "link_ingest",
@@ -308,6 +328,7 @@ Label:
 - web_static: minta website statis/landing page/portofolio
 - web_fullstack: minta web dengan login/database/CRUD
 - web_repair: minta website yang sudah dideploy diperbaiki
+- browse: minta buka/operasikan sebuah situs lewat browser (klik, isi form, ambil data)
 - n8n: minta workflow otomasi n8n
 - learn: minta belajar/riset topik lalu disimpan
 - link_ingest: mengirim link video/artikel untuk dibahas

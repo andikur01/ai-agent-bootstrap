@@ -37,6 +37,7 @@ from app.memory.artifacts import (
     KIND_WEB_APP,
 )
 from app.services.audio_service import AudioService
+from app.services.browser_agent import BrowserAgent
 from app.services.browser_qa import BrowserQA
 from app.services.deploy_service import DeployService
 from app.services.image_service import ImageService
@@ -148,6 +149,7 @@ class Orchestrator:
         )
         self.n8n = N8nService(settings, gateway=gateway, outputs_dir=outputs)
         self.thinking = ThinkingEngine(gateway)
+        self.browser = BrowserAgent(settings, gateway=gateway, outputs_dir=outputs)
 
     # ------------------------------------------------------------------ route
     async def classify(
@@ -542,6 +544,57 @@ class Orchestrator:
             ),
         )
 
+    # ---------------------------------------------------------------- browse
+    async def _do_browse(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
+        """Open a URL in a real browser and carry out the user's instruction."""
+        text = str(route.args.get("text") or "")
+        url = _extract_url(text)
+        task = _strip_url(text) or "Lihat halaman ini dan laporkan isinya."
+
+        if not url:
+            artifact = await self.memory.latest_artifact(user_id, KIND_WEB)
+            if artifact is not None and str(artifact.location).startswith("http"):
+                url = str(artifact.location)
+            else:
+                return Outcome(
+                    text=(
+                        "Kirim URL yang mau aku buka, contoh:\n"
+                        "`/browse https://contoh.com cari harga tiket kereta`"
+                    )
+                )
+
+        if progress:
+            await progress(5, f"Membuka {url}")
+
+        run = await self.browser.run(url, task, user_id=user_id, progress=progress)
+
+        if not run.ok and run.error:
+            return Outcome(
+                text=f"Gagal membuka situs itu.\n`{run.error}`",
+                tokens=200,
+            )
+
+        steps = "\n".join(f"{s}" for s in run.steps[:10])
+        body = run.answer.strip() or "Selesai, tapi tidak ada jawaban yang bisa aku rangkum."
+        text_out = f"*Browser agent* selesai di `{url}`\n\n{body}"
+        if steps:
+            text_out += f"\n\nLangkah:\n{steps}"
+
+        await self.memory.register_artifact(
+            user_id,
+            KIND_LINK,
+            title=f"browse: {task[:60]}",
+            location=url,
+            meta={"task": task, "steps": run.steps[:10], "ok": run.ok},
+        )
+        shots = [s for s in run.screenshots if s][-2:]
+        return Outcome(
+            text=text_out,
+            url=url,
+            milestone_screenshots=shots,
+            tokens=TOKEN_ESTIMATES.get(Intent.THINK, 3000),
+        )
+
     async def _web_outcome(self, user_id: int, shipped, request: str, kind: str = KIND_WEB) -> Outcome:
         location = shipped.deployment.url if shipped.deployment else str(shipped.project.root)
         await self.memory.register_artifact(
@@ -790,6 +843,15 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
 
 def _strip_learn_prefix(text: str) -> str:
     return _strip_prefix(text, ["belajar", "pelajari", "riset", "research", "search", "cari tahu"])
+
+
+def _extract_url(text: str) -> str:
+    match = re.search(r"https?://[^\s<>\"']+", text or "")
+    return match.group(0).rstrip(".,;") if match else ""
+
+
+def _strip_url(text: str) -> str:
+    return re.sub(r"https?://[^\s<>\"']+", " ", text or "").strip()
 
 
 def _size_pair(size: str) -> tuple[int, int] | None:

@@ -118,3 +118,128 @@ async def test_unknown_slash_command_does_not_fall_through_to_chat(settings):
     route = await route_message("/buatgambar", None)
     assert route.source == "fallback"
     assert route.intent.value == "chat"
+
+
+# ------------------------------------------------- 6. browser agent
+def test_action_parser_reads_plain_json():
+    from app.services.browser_agent import parse_action
+
+    action = parse_action('{"action":"click","index":3,"reason":"buka"}')
+    assert action.kind == "click"
+    assert action.index == 3
+
+
+def test_action_parser_survives_fenced_and_chatty_replies():
+    """Models wrap JSON in prose and fences; a miss here stalls the whole run."""
+    from app.services.browser_agent import parse_action
+
+    fenced = parse_action('```json\n{"action":"type","index":2,"text":"halo"}\n```')
+    assert fenced.kind == "type"
+    assert fenced.text == "halo"
+
+    chatty = parse_action('Oke, aku klik tombolnya.\n{"action":"click","index":5}')
+    assert chatty.kind == "click"
+    assert chatty.index == 5
+
+
+def test_action_parser_turns_junk_into_done_not_a_crash():
+    from app.services.browser_agent import parse_action
+
+    assert parse_action("tidak bisa dilanjutkan").kind == "done"
+    assert parse_action({"action": "terbang", "index": "x"}).kind == "done"
+
+
+@pytest.mark.asyncio
+async def test_browser_agent_types_clicks_and_reads_the_result(tmp_path, settings):
+    """End-to-end on a real page: no mocks of the browser, only of the model."""
+    from app.services.browser_agent import BrowserAgent
+
+    page = tmp_path / "page.html"
+    page.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'><title>Toko</title></head><body>"
+        "<input name='q' placeholder='Cari produk'>"
+        "<button onclick=\"document.getElementById('o').textContent='Hasil: sepatu lari'\">Cari</button>"
+        "<p id='o'>Belum ada</p></body></html>",
+        encoding="utf-8",
+    )
+
+    class ScriptedGateway:
+        def __init__(self, script):
+            self.script = list(script)
+            self.prompts = []
+
+        async def complete(self, messages, **kwargs):
+            import json
+            from types import SimpleNamespace
+
+            self.prompts.append(messages[-1]["content"])
+            step = self.script.pop(0) if self.script else {"action": "done", "answer": "selesai"}
+            return SimpleNamespace(text=json.dumps(step))
+
+    gateway = ScriptedGateway(
+        [
+            {"action": "type", "index": 1, "text": "sepatu lari", "reason": "isi kolom"},
+            {"action": "click", "index": 2, "reason": "tekan Cari"},
+            {"action": "done", "answer": "Hasil: sepatu lari", "reason": "selesai"},
+        ]
+    )
+    agent = BrowserAgent(settings, gateway=gateway, outputs_dir=tmp_path / "outputs")
+    run = await agent.run(f"file://{page}", "cari sepatu lari lalu lapor hasilnya")
+
+    assert run.ok, run.error
+    assert "sepatu lari" in run.answer
+    assert len(run.steps) == 3
+    # The model must have been shown the real input, not a guess.
+    assert "Cari produk" in gateway.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_browser_agent_stops_at_the_step_budget(tmp_path, settings):
+    """An agent that never says 'done' must not loop forever."""
+    from app.services.browser_agent import BrowserAgent
+
+    page = tmp_path / "p.html"
+    page.write_text("<html><body><button>Tekan</button></body></html>", encoding="utf-8")
+
+    class LoopingGateway:
+        async def complete(self, messages, **kwargs):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(text='{"action":"scroll","reason":"terus"}')
+
+    agent = BrowserAgent(
+        settings, gateway=LoopingGateway(), outputs_dir=tmp_path / "outputs", max_steps=3
+    )
+    run = await agent.run(f"file://{page}", "jangan pernah selesai")
+    assert not run.ok
+    assert "Batas langkah" in run.answer
+    assert len(run.steps) == 3
+
+
+# ------------------------------------------------- 7. browse intent routing
+@pytest.mark.asyncio
+async def test_browse_request_routes_to_browse_intent(settings):
+    from app.core.intent import Intent, route_message
+
+    route = await route_message("buka https://contoh.com lalu cari harga tiket", None)
+    assert route.intent is Intent.BROWSE
+
+
+@pytest.mark.asyncio
+async def test_browse_without_a_url_asks_for_one(settings, store, gateway, memory):
+    from app.core.intent import Intent, Route
+    from app.core.orchestrator import Orchestrator
+    from app.llm.budget import BudgetGuard
+
+    orch = Orchestrator(
+        settings=settings,
+        store=store,
+        gateway=gateway,
+        memory=memory,
+        cache=None,
+        budget=BudgetGuard(store, settings.daily_token_budget),
+    )
+    outcome = await orch._do_browse(  # noqa: SLF001 - unit under test
+        1, Route(Intent.BROWSE, {"text": "buka situs itu"})
+    )
+    assert "url" in outcome.text.lower()

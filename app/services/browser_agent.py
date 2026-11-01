@@ -1,0 +1,378 @@
+"""A browser the agent drives itself, one step at a time.
+
+``BrowserQA`` answers one question: does this page load cleanly? This module
+answers a harder one: can the agent *use* the page - find a field, type, click,
+and read what happened. It powers "buka situs ini, login, ambil datanya".
+
+The loop is deliberately literal. The model sees a numbered list of interactive
+elements and replies with one action; we execute it, observe the result, and ask
+again. That keeps every step auditable and lets a single bad guess be corrected
+instead of derailing a whole script.
+
+Safety: every click and type targets a numbered element from the last
+observation, never a free-form selector, and the run stops on the step budget or
+on a completion signal. Nothing here submits a payment or creates an account on
+its own - it only does what the model asks for inside the page it was given.
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from app.core.logging_setup import get_logger
+
+log = get_logger(__name__)
+
+MAX_ELEMENTS = 40
+DEFAULT_STEPS = 8
+
+# Elements worth exposing to the model: things a person can actually operate.
+_INTERACTIVE = (
+    "a[href]",
+    "button",
+    "input:not([type=hidden])",
+    "textarea",
+    "select",
+    "[role=button]",
+    "[role=link]",
+    "[contenteditable=true]",
+)
+
+
+@dataclass
+class Element:
+    index: int
+    tag: str
+    label: str
+    kind: str = ""
+    name: str = ""
+
+    def render(self) -> str:
+        bits = [f"[{self.index}]", self.tag]
+        if self.kind:
+            bits.append(f"({self.kind})")
+        if self.name:
+            bits.append(f"name={self.name}")
+        bits.append(f'"{self.label}"')
+        return " ".join(bits)
+
+
+@dataclass
+class Observation:
+    url: str
+    title: str
+    text: str
+    elements: list[Element] = field(default_factory=list)
+    screenshot: str = ""
+    error: str = ""
+
+    def render(self) -> str:
+        lines = [f"URL: {self.url}", f"Judul: {self.title}", "", "Elemen:"]
+        lines += [f"  {e.render()}" for e in self.elements] or ["  (tidak ada)"]
+        body = self.text.strip()
+        if body:
+            lines += ["", "Teks halaman:", body[:1500]]
+        return "\n".join(lines)
+
+
+@dataclass
+class Action:
+    kind: str  # click | type | goto | scroll | back | wait | done
+    index: int = 0
+    text: str = ""
+    url: str = ""
+    reason: str = ""
+    answer: str = ""
+
+
+@dataclass
+class BrowserRun:
+    ok: bool
+    steps: list[str] = field(default_factory=list)
+    answer: str = ""
+    screenshots: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+_ACTION_SCHEMA = """Balas HANYA JSON, satu aksi per langkah:
+{"action":"click","index":3,"reason":"buka menu login"}
+{"action":"type","index":2,"text":"halo","reason":"isi pencarian"}
+{"action":"goto","url":"https://...","reason":"pindah halaman"}
+{"action":"scroll","reason":"lihat bawah halaman"}
+{"action":"back","reason":"kembali"}
+{"action":"wait","reason":"tunggu muat"}
+{"action":"done","answer":"jawaban akhir untuk user","reason":"selesai"}
+
+Aturan:
+- index harus salah satu nomor elemen yang terlihat di observasi terakhir.
+- Pakai "done" begitu tugas selesai atau kalau sudah buntu.
+- Jangan mengarang elemen yang tidak ada."""
+
+
+def parse_action(payload: Any) -> Action:
+    """Turn a model reply into an Action, tolerating prose around the JSON."""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text).strip()
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return Action("done", answer=text[:500], reason="jawaban bukan JSON")
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return Action("done", answer=text[:500], reason="JSON tidak valid")
+    if not isinstance(payload, dict):
+        return Action("done", reason="format tidak dikenali")
+
+    kind = str(payload.get("action") or payload.get("kind") or "done").strip().lower()
+    if kind not in {"click", "type", "goto", "scroll", "back", "wait", "done"}:
+        kind = "done"
+    index = payload.get("index", 0)
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        index = 0
+    return Action(
+        kind=kind,
+        index=index,
+        text=str(payload.get("text") or ""),
+        url=str(payload.get("url") or ""),
+        reason=str(payload.get("reason") or ""),
+        answer=str(payload.get("answer") or "") if kind == "done" else "",
+    )
+
+
+class BrowserAgent:
+    """Drives a real Chromium page under the model's direction."""
+
+    def __init__(self, settings, *, gateway, outputs_dir: Path, max_steps: int | None = None):
+        self.settings = settings
+        self.gateway = gateway
+        self.outputs = Path(outputs_dir)
+        (self.outputs / "browser").mkdir(parents=True, exist_ok=True)
+        self.max_steps = max_steps or int(getattr(settings, "browser_max_steps", DEFAULT_STEPS))
+
+    # ------------------------------------------------------------------ run
+    async def run(
+        self,
+        url: str,
+        task: str,
+        *,
+        user_id: int = 0,
+        progress=None,
+        max_steps: int | None = None,
+    ) -> BrowserRun:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return BrowserRun(False, error="Playwright belum terpasang.")
+
+        budget = max_steps or self.max_steps
+        run = BrowserRun(ok=False)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                context = await browser.new_context(
+                    viewport={"width": 1440, "height": 900}, locale="id-ID"
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:  # noqa: BLE001
+                    return BrowserRun(False, error=f"Gagal buka {url}: {str(exc)[:200]}")
+
+                history = [f"Tugas: {task}"]
+                for step in range(1, budget + 1):
+                    observation = await self._observe(page, step)
+                    run.screenshots.append(observation.screenshot)
+
+                    if progress:
+                        await progress(
+                            10 + int(80 * step / budget),
+                            f"Langkah {step}/{budget}: {observation.title or observation.url}",
+                            screenshot=observation.screenshot,
+                        )
+
+                    action = await self._decide(observation, history, user_id)
+                    run.steps.append(
+                        f"{step}. {action.kind}"
+                        + (f" #{action.index}" if action.index else "")
+                        + (f" {action.text!r}" if action.text else "")
+                        + (f" -> {action.reason}" if action.reason else "")
+                    )
+
+                    if action.kind == "done":
+                        run.ok = True
+                        run.answer = action.answer or "Selesai."
+                        break
+
+                    outcome = await self._apply(page, action, observation)
+                    history.append(f"Aksi: {action.kind} {action.index} -> {outcome}")
+                    if len(history) > 12:  # keep the prompt small
+                        history = history[:1] + history[-8:]
+                else:
+                    run.ok = False
+                    run.answer = "Batas langkah tercapai sebelum tugas selesai."
+
+                final = await self._observe(page, budget + 1)
+                run.screenshots.append(final.screenshot)
+                if run.ok and not run.answer.strip():
+                    run.answer = final.text[:1500]
+                await context.close()
+            finally:
+                await browser.close()
+        return run
+
+    # -------------------------------------------------------------- internals
+    async def _observe(self, page, step: int) -> Observation:
+        try:
+            url = page.url
+            title = (await page.title())[:200]
+        except Exception as exc:  # noqa: BLE001
+            return Observation(url="", title="", text="", error=str(exc)[:200])
+
+        elements: list[Element] = []
+        try:
+            handles = await page.query_selector_all(", ".join(_INTERACTIVE))
+            for handle in handles[:MAX_ELEMENTS]:
+                try:
+                    if not await handle.is_visible():
+                        continue
+                    info = await handle.evaluate(
+                        """el => ({
+                            tag: el.tagName.toLowerCase(),
+                            type: el.getAttribute('type') || '',
+                            name: el.getAttribute('name') || '',
+                            text: (el.innerText || el.value || el.getAttribute('aria-label')
+                                   || el.getAttribute('placeholder') || el.getAttribute('title')
+                                   || '').trim().replace(/\\s+/g, ' ').slice(0, 80),
+                            href: el.getAttribute('href') || ''
+                        })"""
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+
+                label = info.get("text") or info.get("href") or ""
+                if not label:
+                    continue
+
+                index = len(elements) + 1
+                # Stamp the element so a later action can find this exact node
+                # again. A Playwright handle does not survive a reload, and
+                # matching on visible text picks the wrong node when labels
+                # repeat (three "Edit" links, say).
+                try:
+                    await handle.evaluate(
+                        "(el, i) => el.setAttribute('data-agent-idx', i)", index
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+
+                elements.append(
+                    Element(
+                        index=index,
+                        tag=info.get("tag", "?"),
+                        label=label[:80],
+                        kind=info.get("type", ""),
+                        name=info.get("name", "")[:30],
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("element scan failed: %s", exc)
+
+        try:
+            text = await page.inner_text("body")
+        except Exception:  # noqa: BLE001
+            text = ""
+
+        shot = self.outputs / "browser" / f"step-{step:02d}.png"
+        try:
+            await page.screenshot(path=str(shot), full_page=False)
+        except Exception:  # noqa: BLE001
+            shot = None  # type: ignore[assignment]
+
+        return Observation(
+            url=url,
+            title=title,
+            text=text[:4000],
+            elements=elements,
+            screenshot=str(shot) if shot else "",
+        )
+
+    async def _decide(self, observation: Observation, history: list[str], user_id: int) -> Action:
+        messages = [
+            {"role": "system", "content": _ACTION_SCHEMA},
+            {
+                "role": "user",
+                "content": (
+                    "Riwayat:\n"
+                    + "\n".join(history[-6:])
+                    + "\n\nObservasi sekarang:\n"
+                    + observation.render()
+                    + "\n\nAksi berikutnya?"
+                ),
+            },
+        ]
+        try:
+            result = await self.gateway.complete(
+                messages, tier="small", user_id=user_id, temperature=0.1, json_mode=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("browser decision failed: %s", exc)
+            return Action("done", answer="", reason=f"model gagal: {str(exc)[:120]}")
+        return parse_action(result.text)
+
+    async def _apply(self, page, action: Action, observation: Observation) -> str:
+        """Execute one action and describe what happened, for the next prompt."""
+        try:
+            if action.kind == "goto" and action.url:
+                await page.goto(action.url, wait_until="domcontentloaded", timeout=30000)
+                return f"pindah ke {action.url}"
+            if action.kind == "back":
+                await page.go_back(timeout=15000)
+                return "kembali"
+            if action.kind == "wait":
+                await page.wait_for_timeout(1500)
+                return "menunggu"
+            if action.kind == "scroll":
+                await page.mouse.wheel(0, 900)
+                await page.wait_for_timeout(600)
+                return "scroll ke bawah"
+
+            target = next((e for e in observation.elements if e.index == action.index), None)
+            if target is None:
+                return f"elemen #{action.index} tidak ada"
+
+            handle = await self._locator(page, target)
+            if handle is None:
+                return f"elemen #{action.index} sudah tidak ada di halaman"
+
+            if action.kind == "click":
+                await handle.click(timeout=8000)
+                await page.wait_for_timeout(1200)
+                return f"klik {target.label!r}"
+            if action.kind == "type":
+                await handle.fill(action.text, timeout=8000)
+                return f"isi {target.label!r} dengan {action.text!r}"
+            return f"aksi {action.kind} tidak dikenal"
+        except Exception as exc:  # noqa: BLE001
+            return f"gagal: {str(exc)[:160]}"
+
+    async def _locator(self, page, target: Element):
+        """Re-find the element by the tag we stamped during the last scan."""
+        try:
+            handle = await page.query_selector(f'[data-agent-idx="{target.index}"]')
+            if handle:
+                return handle
+        except Exception as exc:  # noqa: BLE001
+            log.debug("relocate failed for #%s: %s", target.index, exc)
+        return None
+
+
+def build_browser_agent(settings, *, gateway, outputs_dir: Path) -> BrowserAgent:
+    return BrowserAgent(settings, gateway=gateway, outputs_dir=outputs_dir)

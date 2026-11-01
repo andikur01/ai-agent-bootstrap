@@ -69,6 +69,7 @@ class Application:
             BotCommand("buat_web", "Buat website static"),
             BotCommand("buat_web_full", "Buat website fullstack"),
             BotCommand("perbaiki_web", "Perbaiki website"),
+            BotCommand("browse", "Buka situs & operasikan"),
             BotCommand("buat_n8n", "Buat workflow n8n"),
             BotCommand("ingat", "Set reminder"),
             BotCommand("jadwal", "Lihat jadwal"),
@@ -204,6 +205,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("buat_web", bot.cmd_buat_web))
     app.add_handler(CommandHandler("buat_web_full", bot.cmd_buat_web_full))
     app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
+    app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))
