@@ -147,6 +147,15 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     scheduler = SchedulerService(store, settings, notifier=notifier)
     orchestrator.scheduler = scheduler
 
+    from app.services.key_discovery import build_discovery
+
+    discovery = build_discovery(
+        settings,
+        profiles=profiles,
+        vault=vault,
+        live_view=live_view,
+        outputs_dir=settings.outputs_path,
+    )
     harvester = build_harvester(
         settings, profiles=profiles, outputs_dir=settings.outputs_path, vault=vault
     )
@@ -175,6 +184,7 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         scheduler=scheduler,
         profiles=profiles,
         harvester=harvester,
+        discovery=discovery,
         live_view=live_view,
         vault=vault,
     )
@@ -256,6 +266,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
+    app.add_handler(CommandHandler("stok", bot.cmd_stok))
     app.add_handler(CommandHandler("akun", bot.cmd_akun))
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))

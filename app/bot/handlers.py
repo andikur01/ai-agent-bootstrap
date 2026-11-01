@@ -161,11 +161,48 @@ def _parse_harvest_request(text: str) -> str | None:
             return name
         if provider.label and provider.label.lower() in lowered:
             return provider.label.lower().split()[0] if " " in provider.label else name
+
+    # A site named in the message, for a provider nobody hard-coded: the user
+    # points at "some new site that hands out keys" and expects the agent to go
+    # there. Returning the URL is what makes that possible; without it the
+    # request fell through to "provider tidak dikenal".
+    site = re.search(r"https?://[^\s<>\"']+", text)
+    if site:
+        return f"site:{site.group(0).rstrip('.,;')}"
+    domain = re.search(
+        r"\b((?:[a-z0-9][a-z0-9-]*\.)+(?:com|net|org|io|ai|co|id|dev|app|me|xyz|tv|so|gg))\b",
+        lowered,
+    )
+    if domain:
+        return f"site:https://{domain.group(1)}"
+
     if re.search(r"\b(semua|all|everything|semuanya)\b", lowered):
         return "all"
     # Nothing named: take the autonomous route and try them all rather than
     # bouncing the question back at the user.
     return "all"
+
+
+def _parse_save_request(text: str) -> list[str] | None:
+    """Return the key values in a "simpan ..." message, or None.
+
+    Discovery deliberately does not store anything: the user sees the values and
+    approves. This is the approve step, and it only accepts strings that are
+    actually key-shaped - so a message that happens to contain a password cannot
+    be saved as a credential just because it was prefixed with "simpan".
+    """
+    if not text:
+        return None
+    if not re.match(r"^\s*/?(simpan|simpanin|pakai|pasang)\b", text, re.I):
+        return None
+    from app.services.key_discovery import looks_like_key
+
+    values: list[str] = []
+    for token in re.split(r"[\s,;]+", text):
+        cleaned = token.strip().strip("`\"'")
+        if looks_like_key(cleaned) and cleaned not in values:
+            values.append(cleaned)
+    return values or None
 
 
 def _provider_names_for_auto() -> list[str]:
@@ -268,6 +305,7 @@ class TelegramBot:
         harvester=None,
         live_view=None,
         vault=None,
+        discovery=None,
     ):
         self.settings = settings
         self.store = store
@@ -277,6 +315,7 @@ class TelegramBot:
         self.harvester = harvester
         self.live_view = live_view
         self.vault = vault or getattr(harvester, "vault", None)
+        self.discovery = discovery
         self.gate = ConfirmationGate(timeout_seconds=180)
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
         self._running: dict[int, asyncio.Task] = {}
@@ -379,10 +418,21 @@ class TelegramBot:
         harvest_target = _parse_harvest_request(text)
         if harvest_target is not None:
             await self.orch.memory.remember_message(user.id, "user", text, {})
-            if harvest_target == "all":
+            if harvest_target.startswith("site:"):
+                await self._discover_on_site(update, harvest_target[5:])
+            elif harvest_target == "all":
                 await self._keys_auto_all(update)
             else:
                 await self.cmd_keys_auto(update, harvest_target)
+            return
+
+        # Approval step for discovery: the agent found keys, the user says which
+        # ones to keep. Kept separate from discovery on purpose - nothing reaches
+        # .env without the user having seen the value first.
+        save_values = _parse_save_request(text)
+        if save_values:
+            await self.orch.memory.remember_message(user.id, "user", text, {})
+            await self._save_discovered_keys(update, save_values)
             return
 
         photo_path = ""
@@ -1161,6 +1211,153 @@ class TelegramBot:
             "Langsung dipakai, tanpa restart. Cek: `/keys`",
             parse_mode="Markdown",
         )
+
+    async def _save_discovered_keys(self, update: Update, values: list[str]) -> None:
+        """Store keys the user approved, after checking the provider accepts them.
+
+        Each value is probed before it is written. A key that a provider rejects
+        is reported and skipped rather than stored - an unusable key in .env
+        looks like capacity that does not exist, and the user would only find out
+        when the bot fell over mid-task.
+        """
+        from app.llm.credentials import (
+            append_key,
+            guess_provider_from_key,
+            next_slot,
+        )
+
+        message = update.effective_message
+        saved: list[str] = []
+        rejected: list[str] = []
+
+        for value in values:
+            provider = guess_provider_from_key(value)
+            if provider is None:
+                rejected.append(f"`{value[:8]}...` — tidak cocok provider mana pun")
+                continue
+
+            probe = await self._probe_key(provider, value)
+            if not probe["ok"]:
+                rejected.append(f"{provider.label}: {probe['reason']}")
+                continue
+
+            env_path = Path(self.settings.env_file)
+            slot = next_slot(env_path, provider.env_var)
+            var = append_key(env_path, provider, value, slot)
+            self._register_pool_key(provider, value, slot)
+            saved.append(f"{provider.label} → `{var}`")
+
+        lines = []
+        if saved:
+            lines.append(f"✅ Tersimpan dan langsung aktif ({len(saved)}):")
+            lines += [f"• {s}" for s in saved]
+        if rejected:
+            lines.append("")
+            lines.append(f"⚠️ Tidak aku simpan ({len(rejected)}):")
+            lines += [f"• {r}" for r in rejected]
+        if saved:
+            lines += ["", "Cek stok sekarang: `/stok`"]
+        await message.reply_text("\n".join(lines) or "Tidak ada yang bisa disimpan.", parse_mode="Markdown")
+
+    async def _discover_on_site(self, update: Update, url: str) -> None:
+        """Go to a site the user names and report every key visible there.
+
+        This is the answer to "ada web baru yang menyediakan api key banyak,
+        bisa ga?" - the old code only knew seven consoles, so any site nobody
+        had hard-coded was unreachable. Here the agent opens whatever it is
+        given, signs in with a saved account if one matches, and reads the page.
+
+        Nothing is stored automatically. The values come back to the user for
+        approval, because a scraper that writes straight into .env is one bad
+        match away from putting a password in a credential slot.
+        """
+        message = update.effective_message
+        if self.discovery is None:
+            await message.reply_text("Browser belum siap di server ini.")
+            return
+
+        from app.services.browser_session import host_from_url
+
+        host = host_from_url(url)
+        status = await message.reply_text(
+            f"🔎 Aku buka *{host}* dan cari key di sana.\n"
+            "Kalau ada akun tersimpan untuk situs itu, aku login sendiri dulu.",
+            parse_mode="Markdown",
+        )
+
+        async def report(pct: int, text: str, screenshot=None) -> None:
+            try:
+                await status.edit_text(f"🔎 {pct}% — {text}")
+            except Exception:  # noqa: BLE001
+                pass
+            if screenshot:
+                try:
+                    with open(screenshot, "rb") as handle:
+                        await message.reply_photo(handle, caption=text[:900])
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            result = await self.discovery.discover(
+                url, user_id=update.effective_user.id, progress=report
+            )
+        except Exception as exc:  # noqa: BLE001 - report, do not crash the bot
+            log.warning("key discovery failed on %s: %s", host, exc)
+            await message.reply_text(f"Gagal memeriksa {host}: {str(exc)[:200]}")
+            return
+
+        # The screenshots are evidence of what the agent actually saw. They go
+        # through the blurring presenter, so a key visible on screen is masked
+        # in the image even though we send the value as text.
+        if result.screenshots:
+            from app.bot.presenter import send_screenshots
+
+            await send_screenshots(message, [str(p) for p in result.screenshots[-2:]])
+
+        if not result.keys:
+            await message.reply_text(
+                f"Tidak ada key yang aku temukan di *{host}*.\n\n"
+                "Kemungkinan: belum login, halamannya butuh dibuat key dulu, "
+                "atau key-nya tidak ditampilkan di halaman itu.\n\n"
+                f"Kalau mau aku login dulu: `/login {url}`",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = [f"🔎 *{len(result.keys)} key ditemukan di {host}*", ""]
+        for found in result.keys:
+            lines.append(f"• `{found.value}` — {found.kind}")
+        lines += [
+            "",
+            "Simpan yang mana? Balas:",
+            f"`simpan {result.keys[0].kind} <key>`",
+            "",
+            "Atau aku simpan semua yang bentuknya cocok:",
+            f"`simpan semua di {host}`",
+        ]
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_stok(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Report the real token stock, counted from stored keys.
+
+        The user asked for a number and insisted it not be invented. So the
+        count comes from the key pool and the environment, and the allowance is
+        labelled an estimate - the provider never tells us the quota, so any
+        precise figure would be a guess dressed up as a fact.
+        """
+        from app.llm.stock import build_stock_counter
+
+        counter = build_stock_counter(self.settings, key_pool=getattr(self.gateway, "key_pool", None))
+        stock = counter.count()
+
+        status = await update.effective_message.reply_text(
+            "📊 Aku hitung key yang tersimpan, lalu tanya langsung ke provider..."
+        )
+        try:
+            await counter.verify(stock)
+        except Exception as exc:  # noqa: BLE001 - a failed check is not a failed report
+            log.debug("stock verification failed: %s", exc)
+        await status.edit_text(stock.report(), parse_mode="Markdown")
 
     def _register_pool_key(self, provider, key: str, slot: int) -> None:
         """Make a freshly stored key usable without restarting the process."""
