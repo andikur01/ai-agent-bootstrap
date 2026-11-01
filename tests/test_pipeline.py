@@ -169,7 +169,8 @@ async def test_thinking_engine_produces_all_passes(orchestrator):
 async def test_web_build_to_qa_to_bundle(tmp_path, settings, stub_web_gateway):
     builder = WebBuilder(settings, gateway=stub_web_gateway, outputs_dir=tmp_path / "outputs")
     project = await builder.build("website kedai kopi Gayo", kind="static")
-    assert [p.name for p in project.files] == ["index.html"]
+    # The design system always writes styles.css alongside the model's markup.
+    assert sorted(p.name for p in project.files) == ["index.html", "styles.css"]
     assert project.issues() == []
 
     service = WebRepairService(

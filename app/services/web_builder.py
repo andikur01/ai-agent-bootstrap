@@ -20,6 +20,12 @@ from pathlib import Path
 
 from app.core.errors import ToolError
 from app.core.logging_setup import get_logger
+from app.services.design_system import (
+    base_stylesheet,
+    choose_direction,
+    design_brief,
+    google_fonts_url,
+)
 
 log = get_logger(__name__)
 
@@ -31,33 +37,62 @@ BANNED_PATTERNS = [
     (re.compile(r"<img(?![^>]*\balt=)[^>]*>", re.I), "img tanpa alt"),
 ]
 
-STATIC_SYSTEM = """Kamu web designer + frontend engineer senior. Buat website statis lengkap.
+STATIC_SYSTEM = """Kamu frontend engineer yang menulis MARKUP dan KONTEN saja.
 
-Balas JSON dengan skema:
+PENTING: desainnya SUDAH DISEDIAKAN. Kamu DILARANG menulis file styles.css
+sendiri dan DILARANG menulis <style> di dalam HTML. File styles.css sudah ada
+dan sudah berisi design system lengkap. Tugasmu mengisi struktur HTML memakai
+class yang sudah disediakan.
+
+Kamu WAJIB memakai class berikut (sudah ada di styles.css):
+- .wrap          : pembungkus lebar konten
+- .site-header   : header lengket, isi .logo + .logo-mark + .nav + .theme-toggle
+- .logo, .logo-mark, .nav
+- .btn, .btn-primary, .btn-ghost
+- .theme-toggle  : tombol dark mode, WAJIB ada, id="theme-toggle"
+- .hero, .hero-grid, .eyebrow, .hero-actions
+- .card          : kartu konten
+- .grid, .grid-2, .grid-3
+- .section-head
+- .thumb         : pengganti gambar, isi teks singkat di dalamnya
+- .price, .badge
+- .site-footer   : isi dengan grid berisi .logo + 2 kolom link
+- .reveal        : tambahkan ke section/kartu agar muncul saat di-scroll
+- .skip-link, .sr-only
+
+Balas JSON:
 {
-  "title": "<judul situs>",
+  "title": "<judul situs, spesifik>",
   "description": "<meta description 140-160 karakter>",
   "files": [
     {"path": "index.html", "content": "<HTML lengkap>"},
-    {"path": "styles.css", "content": "<CSS>"},
-    {"path": "script.js", "content": "<JS>"}
+    {"path": "script.js", "content": "<JS kecil>"}
   ],
   "notes": "<catatan singkat>"
 }
 
-WAJIB:
-- HTML5 lengkap: <!DOCTYPE html>, lang="id", meta charset, meta viewport,
-  <title> spesifik, meta description, Open Graph tags.
-- CSS modern: custom properties, flexbox/grid, dark mode via
-  prefers-color-scheme DAN toggle manual, responsif mobile-first.
-- Aksesibilitas: kontras cukup, aria-label pada tombol ikon, alt pada gambar,
-  fokus visible, heading hierarkis.
-- Konten ASLI dan spesifik sesuai permintaan user. DILARANG lorem ipsum,
-  DILARANG placeholder seperti "Nama Anda" atau "Deskripsi di sini".
-  Tulis konten nyata yang masuk akal.
-- JavaScript vanilla, tanpa framework, tanpa CDN eksternal kalau bisa.
-- Tombol dark mode harus benar-benar berfungsi.
-- Tanpa gambar eksternal: pakai CSS gradient, SVG inline, atau emoji.
+JANGAN sertakan styles.css di daftar files. File itu ditulis otomatis.
+
+WAJIB di HTML:
+- <!DOCTYPE html>, <html lang="id" data-theme="light">, meta charset, viewport
+- <title> spesifik, meta description, Open Graph (og:title, og:description, og:type)
+- <link rel="preconnect" href="https://fonts.googleapis.com"> dan stylesheet font
+- <link rel="stylesheet" href="styles.css">
+- <a class="skip-link" href="#main">Lewati ke konten</a> tepat setelah <body>
+- Struktur: header -> main#main (beberapa section) -> footer
+- Minimal 5 section bermakna: hero, keunggulan/fitur, produk/layanan, testimoni,
+  kontak atau CTA. Sesuaikan dengan permintaan user.
+- KONTEN ASLI dan spesifik. DILARANG lorem ipsum. DILARANG "Nama Anda",
+  "Deskripsi di sini", "Produk 1", "Lorem". Tulis nama merek yang masuk akal,
+  harga nyata, deskripsi yang menjelaskan manfaat.
+- Setiap gambar diganti <div class="thumb"> dengan teks di dalamnya.
+- aria-label pada tombol ikon, alt pada semua <img> (kalau ada).
+
+WAJIB di script.js:
+- Toggle dark mode: baca localStorage, set data-theme di <html>, simpan pilihan,
+  sinkron dengan prefers-color-scheme. Tombol harus benar-benar berubah ikonnya.
+- IntersectionObserver untuk menambah .is-visible ke semua .reveal.
+- Kode defensif: pakai optional chaining, jangan error kalau elemen tidak ada.
 
 Balas JSON saja, tanpa penjelasan di luar JSON."""
 
@@ -175,20 +210,49 @@ class WebBuilder:
         return project
 
     async def _plan(self, request: str, kind: str) -> dict:
+        direction = choose_direction(request)
+        system = APP_TEMPLATES[kind]
+        if kind == "static":
+            system = f"{system}\n\n{design_brief(direction)}"
         result = await self.gateway.complete(
             [
-                {"role": "system", "content": APP_TEMPLATES[kind]},
+                {"role": "system", "content": system},
                 {"role": "user", "content": f"Permintaan user: {request}"},
             ],
             tier="big",
-            temperature=0.4,
-            max_tokens=8000,
+            temperature=0.5,
+            max_tokens=16000,
             json_mode=True,
         )
         data = _parse_json(result.text)
         if not data or not isinstance(data.get("files"), list):
             raise ToolError("Model tidak mengembalikan struktur file yang valid")
+        if kind == "static":
+            data = self._install_design(data, direction, request)
         return data
+
+    def _install_design(self, spec: dict, direction, request: str) -> dict:
+        """Write the design system's CSS into the spec, replacing any the model wrote.
+
+        The model is told not to write styles.css, but a model that ignores that
+        must not be able to ship its own palette. Whatever it produced is
+        dropped and the hand-written sheet takes its place.
+        """
+        files = [
+            entry
+            for entry in spec.get("files", [])
+            if str(entry.get("path") or "").strip().lower() not in {"styles.css", "style.css"}
+        ]
+        files.append({"path": "styles.css", "content": base_stylesheet(direction)})
+        spec["files"] = files
+
+        html_entry = next(
+            (e for e in files if str(e.get("path") or "").endswith("index.html")), None
+        )
+        if html_entry is not None:
+            html_entry["content"] = _wire_head(str(html_entry.get("content") or ""), direction)
+        spec["design"] = direction.key
+        return spec
 
     def _materialise(self, spec: dict, kind: str, slug_source: str) -> WebProject:
         root = self.outputs / "web" / f"{_slug(slug_source)}-{_stamp()}"
@@ -274,6 +338,58 @@ class WebBuilder:
         project.files = sorted(p for p in project.root.rglob("*") if p.is_file())
         project.notes = (repaired.notes or project.notes)[:500]
         return project
+
+
+def _wire_head(html: str, direction) -> str:
+    """Guarantee the font link, the stylesheet link and data-theme are present.
+
+    A model may omit any of these, and each omission is a visibly broken site:
+    no font means system-ui fallback, no stylesheet means unstyled black text on
+    white - exactly the failure the user reported.
+    """
+    if not html.strip():
+        return html
+    fonts = google_fonts_url(direction)
+
+    # Ensure <html> carries lang and data-theme.
+    if re.search(r"<html\b[^>]*>", html, re.I):
+        def fix_html(match: str) -> str:
+            tag = match.group(0)
+            if "lang=" not in tag.lower():
+                tag = tag[:-1] + ' lang="id">'
+            if "data-theme" not in tag.lower():
+                tag = tag[:-1] + ' data-theme="light">'
+            return tag
+
+        html = re.sub(r"<html\b[^>]*>", fix_html, html, count=1, flags=re.I)
+    else:
+        html = '<html lang="id" data-theme="light">' + html
+
+    # Ensure the font stylesheet is linked, right before </head>.
+    font_links = (
+        '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
+        f'<link rel="stylesheet" href="{fonts}">'
+    )
+    if "fonts.googleapis.com" not in html:
+        if "</head>" in html.lower():
+            html = re.sub(r"</head>", font_links + "\n</head>", html, count=1, flags=re.I)
+        else:
+            html = font_links + html
+
+    # Ensure our stylesheet is linked last so it wins over inline styles.
+    html = re.sub(
+        r'<link[^>]+href=["\'](?:\./)?(?:styles|style)\.css["\'][^>]*>',
+        "",
+        html,
+        flags=re.I,
+    )
+    stylesheet = '<link rel="stylesheet" href="styles.css">'
+    if "</head>" in html.lower():
+        html = re.sub(r"</head>", stylesheet + "\n</head>", html, count=1, flags=re.I)
+    else:
+        html = stylesheet + html
+    return html
 
 
 def _parse_json(text: str) -> dict:

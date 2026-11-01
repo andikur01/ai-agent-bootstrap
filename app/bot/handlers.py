@@ -68,80 +68,71 @@ _ASK_TEXTS = {
 # Inside backticks the underscore is literal, so what the user reads is what
 # they can type.
 MENU_SECTIONS: dict[str, tuple[str, str]] = {
-    "chat": (
-        "💬 Chat & Thinking",
-        "💬 *CHAT & THINKING*\n\n"
-        "`/pikir` <topik> - Analisis mendalam 5 langkah\n"
-        "`/belajar` <topik> - Cari di internet, rangkum, simpan permanen\n"
-        "`/memori` - Statistik memori & token terpakai\n"
-        "`/keys` - Status key pool & sisa quota\n"
-        "`/feedback` <pesan> - Catat saranmu",
-    ),
-    "creative": (
-        "🎨 Creative",
-        "🎨 *CREATIVE*\n\n"
-        "`/buat_gambar` <deskripsi> - Generate gambar AI\n"
-        "`/edit_gambar` <deskripsi> - Edit gambar terakhir\n"
-        "`/buat_video` <deskripsi> - Buat video animasi\n"
-        "`/edit_video` <deskripsi> - Edit video terakhir\n"
-        "`/text_to_voice` <teks> - Teks jadi suara\n"
-        "`/voice_to_text` - Voice note jadi teks",
-    ),
     "web": (
         "🌐 Web",
-        "🌐 *WEB DEVELOPMENT*\n\n"
-        "`/buat_web` <deskripsi> - Website static (dites dulu, lalu dikirim)\n"
-        "`/buat_web_full` <deskripsi> - Website fullstack + login + database\n"
-        "`/perbaiki_web` <link> - Perbaiki website yang error\n"
-        "`/browse` <url> <tugas> - Buka situs & klik/isi form sendiri",
+        "🌐 *WEB* - situs statis & fullstack\n\n"
+        "`/buat_web` <deskripsi> - Situs statis profesional\n"
+        "`/buat_web_full` <deskripsi> - Fullstack: login + database\n"
+        "`/perbaiki_web` <link> - Perbaiki situs yang error\n\n"
+        "Tulis saja: `buatkan web toko laptop`",
     ),
     "automation": (
-        "⚙️ Automation",
-        "⚙️ *AUTOMATION*\n\n"
-        "`/buat_n8n` <deskripsi> - Buat workflow n8n\n"
+        "⚙️ n8n",
+        "⚙️ *N8N & JADWAL*\n\n"
+        "`/buat_n8n` <deskripsi> - Workflow siap impor\n"
         "`/ingat` <waktu> <pesan> - Set reminder\n"
         "`/jadwal` - Lihat semua jadwal\n"
-        "`/bataljadwal` <id> - Batalkan satu jadwal",
-    ),
-    "link": (
-        "🔗 Link & Media",
-        "🔗 *LINK & MEDIA*\n\n"
-        "`/baca_link` <url> - Baca & rangkum isi link\n"
-        "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
-        "Kirim voice note - Langsung ditranskrip\n"
-        "Kirim foto - Bisa langsung diedit",
-    ),
-    "browser": (
-        "🖥️ Browser & Key",
-        "🖥️ *BROWSER & KEY*\n\n"
-        "`/live` - Lihat & kendalikan layar browser AI (dari HP)\n"
-        "`/login` <url> - Login sekali ke situs provider\n"
-        "`/keys` - Status key pool\n"
-        "`/keys auto` <provider> - Aku ambil key sendiri\n"
-        "`/keys add` <provider> <key> - Kamu kirim manual\n"
-        "`/keys sumber` - Dari mana key bisa didapat\n"
-        "`/browse` <url> <tugas> - Buka situs & kerjakan sendiri",
+        "`/bataljadwal` <id> - Batalkan jadwal",
     ),
     "system": (
         "📊 System",
         "📊 *SYSTEM*\n\n"
-        "`/status` - Status bot & provider API\n"
-        "`/status_model` - Model AI yang aktif\n"
-        "`/menu` - Tampilkan menu ini\n"
-        "`/help` - Bantuan lengkap\n"
-        "`/batal` - Batalkan konfirmasi",
+        "`/status` - Status bot & provider\n"
+        "`/status_model` - Model AI aktif\n"
+        "`/memori` - Statistik memori\n"
+        "`/help` - Bantuan lengkap",
     ),
 }
 
-MENU_TEXT = (
-    "🤖 *AI Agent Menu*\n\n"
-    "Klik tombol di bawah untuk lihat per kategori, atau langsung ketik\n"
-    "perintahnya. Aku juga paham bahasa biasa - cukup bilang\n"
-    "\"buatkan gambar kucing\", nggak wajib pakai perintah.\n\n"
-    + "\n\n".join(body for _, body in MENU_SECTIONS.values())
-    + "\n\n📊 `/status` - cek bot & API\n"
-    "❓ `/help` - bantuan lengkap"
+# Full help stays available behind /help, but the menu shows only what is
+# actually in use. A wall of commands for features nobody calls is noise.
+HELP_EXTRA = (
+    "🎨 *CREATIVE* (belum jadi fokus)\n\n"
+    "`/buat_gambar` <deskripsi> - Generate gambar\n"
+    "`/edit_gambar` <deskripsi> - Edit gambar terakhir\n"
+    "`/buat_video` <deskripsi> - Buat video\n"
+    "`/edit_video` <deskripsi> - Edit video terakhir\n"
+    "`/text_to_voice` <teks> - Teks jadi suara\n"
+    "`/voice_to_text` - Voice note jadi teks\n\n"
+    "🔗 *LINK & MEDIA*\n\n"
+    "`/baca_link` <url> - Rangkum isi link\n"
+    "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
+    "Kirim voice note - Langsung ditranskrip\n\n"
+    "🖥️ *BROWSER & KEY*\n\n"
+    "`/live` - Nonton layar browser AI dari HP\n"
+    "`/login` <url> - Login sekali ke situs provider\n"
+    "`/keys` - Status key pool\n"
+    "`/keys auto` <provider> - Ambil key otomatis\n"
+    "`/keys add` <provider> <key> - Kirim manual\n\n"
+    "💬 *CHAT*\n\n"
+    "`/pikir` <topik> - Analisis 5 langkah\n"
+    "`/belajar` <topik> - Cari, rangkum, simpan permanen\n"
+    "`/feedback` <pesan> - Catat saranmu\n"
+    "`/browse` <url> <tugas> - Kerjakan situs sendiri"
 )
+
+MENU_TEXT = (
+    "🤖 *AI Agent*\n\n"
+    "Bilang saja pakai bahasa biasa, aku paham. Contoh:\n"
+    "• `buatkan web toko laptop`\n"
+    "• `buatkan workflow n8n untuk chat otomatis`\n"
+    "• `apakah webnya sudah jadi?`\n\n"
+    + "\n\n".join(body for _, body in MENU_SECTIONS.values())
+    + "\n\nKetik `/help` untuk semua perintah."
+)
+
+# /help shows the full command list; the menu stays short.
+HELP_TEXT = HELP_TEXT + "\n\n" + HELP_EXTRA
 
 
 def menu_keyboard() -> InlineKeyboardMarkup:
@@ -533,6 +524,11 @@ class TelegramBot:
             body = outcome.text
             if outcome.cached:
                 body += "\n\n_(dari cache, hemat token)_"
+            # Report what the task actually cost. A guessed estimate before the
+            # run is a promise; the real number afterwards is a fact, and the
+            # user asked for the fact.
+            if outcome.tokens:
+                body += f"\n\n_Token terpakai: {outcome.tokens:,}_"
             await send_text(message, body)
 
             for path in outcome.files or []:

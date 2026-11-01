@@ -117,10 +117,12 @@ def test_menu_section_unknown_falls_back_to_full_menu():
     assert body == MENU_TEXT
 
 
-def test_creative_section_mentions_the_commands_it_advertises():
-    _, body = MENU_SECTIONS["creative"]
+def test_help_mentions_the_creative_commands_it_advertises():
+    """Creative lives in /help now, not in the short menu."""
+    from app.bot.handlers import HELP_TEXT
+
     for command in ("/buat_gambar", "/edit_gambar", "/buat_video", "/edit_video", "/text_to_voice"):
-        assert command in body
+        assert command in HELP_TEXT
 
 
 @pytest.mark.asyncio
@@ -151,11 +153,11 @@ async def test_cmd_status_model_lists_tiers(bot):
 
 @pytest.mark.asyncio
 async def test_menu_callback_edits_message_in_place(bot):
-    update = FakeCallbackUpdate(f"{MENU_PREFIX}creative")
+    update = FakeCallbackUpdate(f"{MENU_PREFIX}web")
     await bot.on_callback(update, FakeContext())
     assert update.callback_query.edits, "menu click must edit the message"
     text, markup = update.callback_query.edits[-1]
-    assert "/buat_gambar" in text
+    assert "/buat_web" in text
     assert markup is not None
 
 

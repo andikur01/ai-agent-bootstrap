@@ -801,13 +801,15 @@ def test_status_question_is_flagged_for_factual_answer():
     assert route.args.get("ask_status") is True
 
 
-def test_menu_sections_include_a_browser_group():
-    from app.bot.handlers import MENU_SECTIONS
+def test_menu_is_short_and_help_keeps_the_rest():
+    """The menu shows what is in use; /help keeps everything else reachable."""
+    from app.bot.handlers import HELP_TEXT, MENU_SECTIONS, MENU_TEXT
 
-    assert "browser" in MENU_SECTIONS
-    body = MENU_SECTIONS["browser"][1]
+    assert set(MENU_SECTIONS) == {"web", "automation", "system"}
+    for command in ("/buat_web", "/buat_web_full", "/perbaiki_web"):
+        assert command in MENU_TEXT
     for command in ("/live", "/login", "/keys"):
-        assert command in body
+        assert command in HELP_TEXT
 
 
 def test_watchable_intents_use_enum_members():
@@ -816,3 +818,111 @@ def test_watchable_intents_use_enum_members():
 
     assert Intent.WEB_STATIC in _WATCHABLE_INTENTS
     assert all(isinstance(i, Intent) for i in _WATCHABLE_INTENTS)
+
+
+# ---------------------------------------------------------------------------
+# Design system: generated sites must not be black-and-white slop.
+# ---------------------------------------------------------------------------
+
+
+def test_every_direction_has_a_real_palette():
+    """Each direction must carry visible colour somewhere.
+
+    Not necessarily in ``brand``: Neo is brutalist black on purpose, and its
+    colour lives in the accent. What is forbidden is a palette with no colour at
+    all, which is the grey site the user complained about.
+    """
+    from app.services.design_system import DIRECTIONS
+
+    for key, direction in DIRECTIONS.items():
+        assert len(direction.palette) >= 8, key
+        chromatic = []
+        for name, value in direction.palette.items():
+            if not (value.startswith("#") and len(value) == 7):
+                continue
+            r, g, b = (int(value[i : i + 2], 16) for i in (1, 3, 5))
+            if max(r, g, b) - min(r, g, b) > 40:
+                chromatic.append(name)
+        assert chromatic, f"{key} has no visible colour at all"
+        assert direction.palette["brand"].startswith("#"), key
+
+
+def test_stylesheet_bans_the_slop_colours():
+    """#007bff is the bootstrap-blue giveaway of a template nobody designed."""
+    from app.services.design_system import DIRECTIONS, base_stylesheet
+
+    for direction in DIRECTIONS.values():
+        css = base_stylesheet(direction)
+        assert "#007bff" not in css
+        assert "#6c757d" not in css
+        # system-ui may appear as a fallback, but never as the only family.
+        assert "font-family: system-ui" not in css
+        assert "font-family: sans-serif" not in css
+        assert "--brand:" in css
+        assert "prefers-color-scheme" in css
+        assert "prefers-reduced-motion" in css
+        assert ":focus-visible" in css
+        assert css.count("{") == css.count("}"), direction.key
+
+
+def test_direction_routing_picks_something_sensible():
+    from app.services.design_system import choose_direction
+
+    assert choose_direction("toko laptop murah").key in {"aurora", "terracotta"}
+    assert choose_direction("kedai kopi artisanal").key == "terracotta"
+    assert choose_direction("portofolio fotografer").key == "atelier"
+    assert choose_direction("aplikasi kripto trading").key == "midnight"
+    # Unknown requests still get a real direction, never a blank.
+    assert choose_direction("blah blah").key == "aurora"
+
+
+def test_install_design_replaces_whatever_css_the_model_wrote():
+    """The model must not be able to ship its own palette."""
+    from app.services.design_system import choose_direction
+    from app.services.web_builder import WebBuilder
+
+    builder = WebBuilder.__new__(WebBuilder)
+    spec = {
+        "files": [
+            {"path": "index.html", "content": "<html><head></head><body>hi</body></html>"},
+            {"path": "styles.css", "content": "body{background:#007bff}"},
+        ]
+    }
+    direction = choose_direction("toko laptop")
+    out = builder._install_design(spec, direction, "toko laptop")
+    css = next(f["content"] for f in out["files"] if f["path"] == "styles.css")
+    assert "#007bff" not in css
+    assert "--brand:" in css
+    assert out["design"] == direction.key
+
+
+def test_wire_head_guarantees_fonts_and_stylesheet():
+    from app.services.design_system import choose_direction
+    from app.services.web_builder import _wire_head
+
+    direction = choose_direction("toko laptop")
+    html = "<!DOCTYPE html><html><head><title>x</title></head><body>y</body></html>"
+    out = _wire_head(html, direction)
+    assert "fonts.googleapis.com" in out
+    assert 'href="styles.css"' in out
+    assert 'lang="id"' in out
+    assert 'data-theme="light"' in out
+
+
+def test_wire_head_does_not_duplicate_the_stylesheet():
+    from app.services.design_system import choose_direction
+    from app.services.web_builder import _wire_head
+
+    direction = choose_direction("toko laptop")
+    html = '<html lang="id" data-theme="light"><head><link rel="stylesheet" href="styles.css"></head><body>y</body></html>'
+    out = _wire_head(html, direction)
+    assert out.count('href="styles.css"') == 1
+
+
+def test_token_estimate_is_a_range_not_a_false_precision():
+    from app.core.orchestrator import TOKEN_ESTIMATES
+
+    for intent, value in TOKEN_ESTIMATES.items():
+        assert isinstance(value, tuple), intent
+        low, high = value
+        assert low < high, intent

@@ -80,21 +80,25 @@ CONFIRM_TEMPLATES = {
     Intent.THINK: ("🧠 Analisis mendalam (5 pass)", "think"),
 }
 
+# Honest ranges, not point estimates. A single number implies a precision
+# nobody has before the model has seen the request: the same "buat web" can cost
+# 4k or 30k depending on how many files and repair rounds it needs. A range plus
+# the real total after the run is more useful than a confident wrong figure.
 TOKEN_ESTIMATES = {
-    Intent.IMAGE_CREATE: 900,
-    Intent.IMAGE_EDIT: 900,
-    Intent.VIDEO_CREATE: 2500,
-    Intent.VIDEO_EDIT: 400,
-    Intent.AUDIO_CREATE: 600,
-    Intent.AUDIO_EDIT: 200,
-    Intent.WEB_STATIC: 9000,
-    Intent.WEB_FULLSTACK: 14000,
-    Intent.WEB_REPAIR: 12000,
-    Intent.N8N: 3000,
-    Intent.LEARN: 6000,
-    Intent.LINK_INGEST: 8000,
-    Intent.THINK: 7000,
-    Intent.CHAT: 700,
+    Intent.IMAGE_CREATE: (600, 1500),
+    Intent.IMAGE_EDIT: (600, 1500),
+    Intent.VIDEO_CREATE: (1500, 6000),
+    Intent.VIDEO_EDIT: (200, 800),
+    Intent.AUDIO_CREATE: (300, 900),
+    Intent.AUDIO_EDIT: (100, 400),
+    Intent.WEB_STATIC: (4000, 20000),
+    Intent.WEB_FULLSTACK: (6000, 30000),
+    Intent.WEB_REPAIR: (5000, 25000),
+    Intent.N8N: (1500, 6000),
+    Intent.LEARN: (2000, 8000),
+    Intent.LINK_INGEST: (3000, 12000),
+    Intent.THINK: (3000, 12000),
+    Intent.CHAT: (300, 1200),
 }
 
 
@@ -170,18 +174,18 @@ class Orchestrator:
             has_document=has_document,
         )
 
-    def estimate_tokens(self, route: Route) -> int:
-        return TOKEN_ESTIMATES.get(route.intent, 700)
+    def estimate_tokens(self, route: Route) -> tuple[int, int]:
+        return TOKEN_ESTIMATES.get(route.intent, (300, 1200))
 
     def confirmation_prompt(self, route: Route) -> str:
         label, _ = CONFIRM_TEMPLATES.get(route.intent, ("Jalankan tugas", ""))
-        tokens = self.estimate_tokens(route)
+        low, high = self.estimate_tokens(route)
         target = ""
         if route.args.get("reference_brief"):
             target = f"\nTarget: {route.args['reference_brief']}"
         return (
             f"{label}?\n"
-            f"Estimasi: ~{tokens:,} token"
+            f"Perkiraan token: {low:,}-{high:,}"
             f"{target}\n\n"
             "Balas *ya* untuk lanjut, *tidak* untuk batal."
         )
