@@ -353,8 +353,17 @@ class Orchestrator:
             location=str(result.path),
             meta={"prompt": prompt, "provider": result.provider, "size": f"{result.width}x{result.height}"},
         )
+        note = ""
+        requested = _size_pair(size)
+        if requested and (result.width, result.height) != requested:
+            # The free tier quietly downscales, so say so instead of letting the
+            # delivered size silently disagree with what was asked for.
+            note = (
+                f"\nCatatan: diminta {requested[0]}x{requested[1]}, "
+                f"provider gratis memberi {result.width}x{result.height}."
+            )
         return Outcome(
-            text=f"Gambar jadi ({result.provider}, {result.width}x{result.height}).",
+            text=f"Gambar jadi ({result.provider}, {result.width}x{result.height}).{note}",
             photos=[str(result.path)],
             files=[str(result.path)],
             tokens=900,
@@ -781,6 +790,13 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
 
 def _strip_learn_prefix(text: str) -> str:
     return _strip_prefix(text, ["belajar", "pelajari", "riset", "research", "search", "cari tahu"])
+
+
+def _size_pair(size: str) -> tuple[int, int] | None:
+    match = re.match(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", size or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _extract_size(text: str) -> str:

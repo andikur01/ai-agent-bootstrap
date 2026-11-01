@@ -91,7 +91,13 @@ class ImageService:
                 )
 
             errors: list[str] = []
-            for provider_name, fn in self._generation_providers():
+            providers = self._generation_providers()
+            for index, (provider_name, fn) in enumerate(providers):
+                # Generating is the slow part (a network render can take 30s+).
+                # Without a step here the bar sat at 10% and looked frozen.
+                if progress:
+                    base = 15 + int(40 * index / max(1, len(providers)))
+                    await progress(base, f"Mencoba {provider_name}...")
                 try:
                     await fn(full_prompt, path, size, negative)
                     provider_used = provider_name
