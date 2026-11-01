@@ -10,6 +10,7 @@ Responsibilities kept here (and nowhere else):
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -129,6 +130,50 @@ HELP_EXTRA = (
     "`/feedback` <pesan> - Catat saranmu\n"
     "`/browse` <url> <tugas> - Kerjakan situs sendiri"
 )
+
+def _parse_harvest_request(text: str) -> str | None:
+    """Return a provider name (or "all") when the user asks for a key.
+
+    The browser exists so the user never has to open a provider console. Making
+    them learn /keys auto first would waste that, so plain phrasing routes here:
+    "ambilkan key gemini", "ambil semua key", "kasih aku api key groq".
+
+    Returns None when this is not a key request, so normal routing continues.
+    """
+    if not text:
+        return None
+    lowered = text.lower()
+    verb = re.search(
+        r"\b(ambil|ambilkan|ambilin|kasih|kasihin|beri|berikan|dapatkan|tarik|pungut|isi|setup|pasang)\b",
+        lowered,
+    )
+    noun = re.search(r"\b(api\s*key|apikey|key|token|kunci)\b", lowered)
+    if not verb or not noun:
+        return None
+    # "bikin akun" is not this; account creation stays manual.
+    if re.search(r"\b(akun|account|daftar|signup|sign\s*up|register)\b", lowered):
+        return None
+
+    from app.llm.credentials import PROVIDERS
+
+    for name, provider in PROVIDERS.items():
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            return name
+        if provider.label and provider.label.lower() in lowered:
+            return provider.label.lower().split()[0] if " " in provider.label else name
+    if re.search(r"\b(semua|all|everything|semuanya)\b", lowered):
+        return "all"
+    # Nothing named: take the autonomous route and try them all rather than
+    # bouncing the question back at the user.
+    return "all"
+
+
+def _provider_names_for_auto() -> list[str]:
+    from app.llm.credentials import PROVIDERS
+
+    # Free tiers first, which is the order PROVIDERS is already written in.
+    return list(PROVIDERS)
+
 
 MENU_TEXT = (
     "🤖 *Yang bisa aku kerjakan*\n\n"
@@ -324,6 +369,18 @@ class TelegramBot:
             self.limiter.check(user.id)
         except RateLimitedError as exc:
             await message.reply_text(exc.user_message)
+            return
+
+        # "ambilkan key gemini" is the whole point of the browser being here:
+        # the user should not have to learn /keys auto. Detect the intent in
+        # plain language and route straight to the harvester.
+        harvest_target = _parse_harvest_request(text)
+        if harvest_target is not None:
+            await self.orch.memory.remember_message(user.id, "user", text, {})
+            if harvest_target == "all":
+                await self._keys_auto_all(update)
+            else:
+                await self.cmd_keys_auto(update, harvest_target)
             return
 
         photo_path = ""
@@ -987,6 +1044,90 @@ class TelegramBot:
         states = pool.states.setdefault(provider.name, [])
         if not any(s.key == key for s in states):
             states.append(KeyState(provider=provider.name, slot=slot, key=key))
+
+    async def _keys_auto_all(self, update: Update) -> None:
+        """Walk every provider and fetch whatever the saved sessions allow.
+
+        This is the autonomous version of the key chore: the user says "ambil
+        semua key" once and the agent works down the list, skipping providers it
+        is not signed into yet and reporting exactly which login is still needed.
+        One provider failing never stops the rest - the useful outcome is the
+        keys it did get, not a clean sweep.
+        """
+        from app.llm.credentials import PROVIDERS
+
+        message = update.effective_message
+        names = list(PROVIDERS)
+        status = await message.reply_text(
+            f"🤖 Aku coba ambil key dari {len(names)} provider, satu per satu.\n"
+            "Yang belum login akan aku lewati dan aku beri tahu.",
+        )
+
+        got: list[str] = []
+        need_login: list[str] = []
+        failed: list[str] = []
+
+        for index, name in enumerate(names, start=1):
+            provider = PROVIDERS[name]
+            try:
+                await status.edit_text(
+                    f"🤖 {index}/{len(names)} — mencoba *{provider.label}*...",
+                    parse_mode="Markdown",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            try:
+                outcome = await self._harvest_one(provider, update)
+            except Exception as exc:  # noqa: BLE001 - one provider must not stop the rest
+                failed.append(f"{provider.label}: {str(exc)[:60]}")
+                continue
+
+            if outcome == "ok":
+                got.append(provider.label)
+            elif outcome == "login":
+                need_login.append(provider.label)
+            else:
+                failed.append(provider.label)
+
+        lines = [f"🤖 Selesai. Hasil dari {len(names)} provider:\n"]
+        lines.append(f"✅ Dapat key baru: {', '.join(got) if got else 'belum ada'}")
+        if need_login:
+            lines.append(
+                f"🔑 Perlu kamu login sekali: {', '.join(need_login)}\n"
+                "   Jalankan `/login <url>` untuk yang kamu mau, lalu ulangi."
+            )
+        if failed:
+            lines.append(f"❌ Gagal/lewat: {', '.join(failed)}")
+        lines.append("\nCek semua key aktif: `/keys`")
+        await message.reply_text("\n".join(lines))
+
+    async def _harvest_one(self, provider, update: Update) -> str:
+        """Harvest a single provider. Returns "ok", "login" or "failed"."""
+        from app.llm.capacity import acquire_message
+
+        if self.harvester is None:
+            return "failed"
+
+        user_id = update.effective_user.id
+        result = await self.harvester.harvest(provider, user_id=user_id)
+        if result.needs_login:
+            return "login"
+        if not result.ok:
+            return "failed"
+
+        probe = await self._probe_key(provider, result.key)
+        if not probe["ok"]:
+            return "failed"
+
+        from app.llm.credentials import append_key, next_slot
+
+        env_path = Path(self.settings.env_file)
+        slot = next_slot(env_path, provider.env_var)
+        append_key(env_path, provider, result.key, slot)
+        self._register_pool_key(provider, result.key, slot)
+        log.info("harvested %s key into slot %s", provider.name, slot)
+        return "ok"
 
     async def cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = list(context.args or [])

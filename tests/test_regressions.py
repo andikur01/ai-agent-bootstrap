@@ -991,3 +991,50 @@ def test_viewer_url_is_empty_without_a_configured_host():
         data_dir = "/tmp"
 
     assert LiveViewService(FakeSettings()).viewer_url() == ""
+
+
+# ---------------------------------------------------------------------------
+# "ambilkan key" must work from plain chat, not only from /keys auto.
+# ---------------------------------------------------------------------------
+
+
+def test_plain_language_key_request_routes_to_a_provider():
+    from app.bot.handlers import _parse_harvest_request
+
+    assert _parse_harvest_request("ambilkan key gemini") == "gemini"
+    assert _parse_harvest_request("kasih aku api key groq dong") == "groq"
+    assert _parse_harvest_request("tolong ambilin token openrouter") == "openrouter"
+    assert _parse_harvest_request("Ambilkan API Key Gemini") == "gemini"
+
+
+def test_plain_language_key_request_without_a_name_tries_all():
+    from app.bot.handlers import _parse_harvest_request
+
+    assert _parse_harvest_request("ambilkan semua key") == "all"
+    assert _parse_harvest_request("ambil key dong") == "all"
+
+
+def test_creating_an_account_is_not_a_key_request():
+    """Account signup stays manual, so it must not reach the harvester."""
+    from app.bot.handlers import _parse_harvest_request
+
+    assert _parse_harvest_request("bikin akun gemini baru") is None
+    assert _parse_harvest_request("daftar akun groq") is None
+    assert _parse_harvest_request("register akun openrouter") is None
+
+
+def test_ordinary_chat_is_not_mistaken_for_a_key_request():
+    from app.bot.handlers import _parse_harvest_request
+
+    assert _parse_harvest_request("buatkan web toko kopi") is None
+    assert _parse_harvest_request("apa itu api key?") is None
+    assert _parse_harvest_request("") is None
+    assert _parse_harvest_request("lanjutkan yang tadi") is None
+
+
+def test_auto_order_puts_the_generous_free_tiers_first():
+    from app.bot.handlers import _provider_names_for_auto
+
+    names = _provider_names_for_auto()
+    assert names[0] == "gemini", "Gemini has the most generous free tier"
+    assert "groq" in names
