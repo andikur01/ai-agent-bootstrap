@@ -97,6 +97,17 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "Kirim voice note - Langsung ditranskrip\n"
         "Kirim foto - Bisa langsung diedit",
     ),
+    "browser": (
+        "🖥️ Browser & Key",
+        "🖥️ *BROWSER & KEY*\n\n"
+        "`/live` - Lihat & kendalikan layar browser AI (dari HP)\n"
+        "`/login` <url> - Login sekali ke situs provider\n"
+        "`/keys` - Status key pool\n"
+        "`/keys auto` <provider> - Aku ambil key sendiri\n"
+        "`/keys add` <provider> <key> - Kamu kirim manual\n"
+        "`/keys sumber` - Dari mana key bisa didapat\n"
+        "`/browse` <url> <tugas> - Buka situs & kerjakan sendiri",
+    ),
     "system": (
         "📊 System",
         "📊 *SYSTEM*\n\n"
@@ -171,6 +182,7 @@ class TelegramBot:
         scheduler=None,
         profiles=None,
         harvester=None,
+        live_view=None,
     ):
         self.settings = settings
         self.store = store
@@ -178,6 +190,7 @@ class TelegramBot:
         self.scheduler = scheduler
         self.profiles = profiles
         self.harvester = harvester
+        self.live_view = live_view
         self.gate = ConfirmationGate(timeout_seconds=180)
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
         self._running: dict[int, asyncio.Task] = {}
@@ -567,6 +580,44 @@ class TelegramBot:
             f"Cache semantik: {'aktif' if self.settings.semantic_cache_enabled else 'mati'}",
             f"Scheduler: {'aktif' if self.scheduler is not None else 'mati'}",
         ]
+
+        # Real numbers, not vibes: the user asked to see progress and usage.
+        user = update.effective_user
+        if user is not None:
+            budget = getattr(self.orch, "budget", None)
+            if budget is not None:
+                try:
+                    used = await budget.usage(user.id)
+                    left = await budget.remaining(user.id)
+                    lines.append(
+                        f"Token hari ini: {used['total_tokens']:,} terpakai, "
+                        f"{left:,} sisa"
+                    )
+                except Exception:  # noqa: BLE001 - status must never crash
+                    pass
+            store = getattr(self, "store", None)
+            if store is not None:
+                try:
+                    tasks = await store.task_counts(user.id)
+                    lines.append(
+                        f"Tugas: {tasks.get('done', 0)} selesai, "
+                        f"{tasks.get('failed', 0)} gagal, "
+                        f"{tasks.get('running', 0)} jalan"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        pool = getattr(self.gateway, "key_pool", None)
+        if pool is not None:
+            try:
+                total_keys = sum(len(v) for v in pool.states.values())
+                spent = pool.exhausted()
+                lines.append(f"Key pool: {total_keys} key aktif")
+                if spent:
+                    lines.append(f"⚠️ Key habis: {', '.join(spent)}")
+            except Exception:  # noqa: BLE001
+                pass
+
         await send_text(update.effective_message, "\n".join(lines))
 
     async def cmd_status_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -642,6 +693,54 @@ class TelegramBot:
             await update.effective_message.reply_text("Pikir tentang apa? Contoh: /pikir kenapa langit biru")
             return
         await self._run_confirmed(update, context, Intent.THINK, {"text": question})
+
+    async def cmd_live(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the agent's screen as a link the user can watch and click.
+
+        This is the Astra/Argon trick, done with free parts: Xvfb is the screen,
+        x11vnc exports it, noVNC turns it into a web page. The user opens one URL
+        and sees exactly what the browser sees - and can take over for a captcha
+        or a login.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+        if self.live_view is None:
+            await update.message.reply_text("Live view belum aktif di server ini.")
+            return
+
+        status = await update.message.reply_text("🖥️ Menyiapkan layar browser...")
+        state = await self.live_view.ensure()
+
+        if not state.running:
+            await status.edit_text(
+                "❌ Live view gagal jalan:\n"
+                + "\n".join(f"• {e}" for e in state.errors)
+                + "\n\nDi server tanpa layar, ini memang tidak bisa. "
+                "Pakai `/keys add <provider> <key>` untuk key-nya."
+            )
+            return
+
+        url = self.live_view.viewer_url()
+        if not url:
+            await status.edit_text(
+                "Layar jalan, tapi URL publiknya belum diset.\n"
+                "Isi `LIVE_VIEW_HOST=https://work-2-....prod-runtime.all-hands.dev` "
+                "di `.env` lalu `/live` lagi.",
+                parse_mode="Markdown",
+            )
+            return
+
+        await status.edit_text(
+            "🖥️ *Layar browser AI*\n\n"
+            f"👉 {url}\n\n"
+            f"Password VNC: `{state.password}`\n\n"
+            "Buka linknya di HP. Kamu bisa *lihat* dan *klik* langsung. "
+            "Aku tetap yang menjalankan tugas; kalau perlu captcha atau login, "
+            "kamu ambil alih di layar itu.\n\n"
+            "Catatan: siapa pun yang punya link + password ini bisa mengendalikan "
+            "browser. Jangan dibagikan.",
+            parse_mode="Markdown",
+        )
 
     async def cmd_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Open a real browser so the user signs in once; we keep the session.

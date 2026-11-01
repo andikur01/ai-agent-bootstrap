@@ -144,6 +144,9 @@ class Store:
         rows = self._query(sql, params)
         return rows[0] if rows else None
 
+    def _query_all(self, sql: str, params: tuple = ()) -> list[dict]:
+        return self._query(sql, params)
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -310,6 +313,17 @@ class Store:
                 (user_id, since.isoformat()),
             )
         return int(row["c"]) if row else 0
+
+    async def task_counts(self, user_id: int, hours: int = 24) -> dict[str, int]:
+        """Status tally for the last *hours*, for the /status panel."""
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        rows = await run_blocking(
+            self._query_all,
+            "SELECT status, COUNT(*) AS c FROM tasks "
+            "WHERE user_id = ? AND created_at >= ? GROUP BY status",
+            (user_id, since.isoformat()),
+        )
+        return {str(row["status"]): int(row["c"]) for row in (rows or [])}
 
     # ---------------- schedules ----------------
     async def add_schedule(

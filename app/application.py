@@ -64,6 +64,7 @@ class Application:
             BotCommand("memori", "Statistik memori & token"),
             BotCommand("keys", "Key pool: status, add, auto, sumber"),
             BotCommand("login", "Login sekali ke situs provider"),
+            BotCommand("live", "Lihat & kendalikan layar browser AI"),
             BotCommand("buat_gambar", "Generate gambar"),
             BotCommand("edit_gambar", "Edit gambar terakhir"),
             BotCommand("buat_video", "Buat video"),
@@ -136,8 +137,10 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     # /keys auto fetch a fresh key from a console the user is signed into.
     from app.services.browser_session import build_profiles
     from app.services.key_harvester import build_harvester
+    from app.services.live_view import build_live_view
 
     profiles = build_profiles(settings)
+    live_view = build_live_view(settings)
     harvester = build_harvester(
         settings, profiles=profiles, outputs_dir=settings.outputs_path
     )
@@ -149,6 +152,7 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         scheduler=scheduler,
         profiles=profiles,
         harvester=harvester,
+        live_view=live_view,
     )
 
     telegram_app = None
@@ -229,6 +233,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
     app.add_handler(CommandHandler("login", bot.cmd_login))
+    app.add_handler(CommandHandler("live", bot.cmd_live))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))

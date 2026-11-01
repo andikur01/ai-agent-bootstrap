@@ -635,3 +635,73 @@ def test_acquire_message_names_the_console_and_the_command():
     text = acquire_message("gemini", "https://aistudio.google.com/apikey")
     assert "https://aistudio.google.com/apikey" in text
     assert "/keys add gemini" in text
+
+
+# ---------------------------------------------------------------------------
+# Live view: the user must be able to watch and click the agent's browser.
+# ---------------------------------------------------------------------------
+
+def test_live_view_url_points_at_vnc_html():
+    from app.services.live_view import LiveView
+
+    state = LiveView()
+    url = state.url("https://work-2.example.dev")
+    assert url.startswith("https://work-2.example.dev/")
+    assert "vnc.html" in url
+    # autoconnect so the user lands straight in the screen, not a form.
+    assert "autoconnect=1" in url
+
+
+def test_live_view_url_is_empty_without_a_host():
+    """No host configured means no link, rather than a broken one."""
+    from app.services.live_view import LiveViewService
+
+    service = LiveViewService(settings=None)
+    assert service.viewer_url() == ""
+
+
+def test_live_view_reports_missing_tools_instead_of_crashing(monkeypatch):
+    import asyncio
+
+    from app.services.live_view import LiveViewService
+
+    service = LiveViewService(settings=None)
+
+    async def no_tools(name):
+        return False
+
+    monkeypatch.setattr(service, "_which", no_tools)
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+    state = asyncio.run(service.ensure())
+
+    assert not state.running
+    assert state.errors
+    assert any("x11vnc" in e for e in state.errors)
+
+
+def test_live_view_port_comes_from_settings():
+    from dataclasses import dataclass
+
+    from app.services.live_view import LiveViewService
+
+    @dataclass
+    class S:
+        live_view_port: int = 12001
+        live_view_host: str = "https://work-2.example.dev"
+
+    service = LiveViewService(settings=S())
+    assert service.state.web_port == 12001
+    assert "work-2.example.dev" in service.viewer_url()
+
+
+def test_live_view_password_is_not_guessable():
+    from app.services.live_view import LiveViewService
+
+    service = LiveViewService(settings=None)
+    state = service.state
+    assert state.password == ""
+    # A generated password must be long enough to survive a VNC brute force.
+    import secrets
+
+    sample = secrets.token_urlsafe(9)
+    assert len(sample) >= 12
