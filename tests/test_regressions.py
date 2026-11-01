@@ -243,3 +243,71 @@ async def test_browse_without_a_url_asks_for_one(settings, store, gateway, memor
         1, Route(Intent.BROWSE, {"text": "buka situs itu"})
     )
     assert "url" in outcome.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Key pool: several keys per provider, rotated when one runs dry.
+# ---------------------------------------------------------------------------
+
+def _settings_with_pool(monkeypatch, **env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    from app.core.config import Settings
+
+    return Settings(_env_file=None)
+
+
+def test_pool_reads_numbered_env_vars(monkeypatch):
+    settings = _settings_with_pool(
+        monkeypatch,
+        GEMINI_API_KEY="key-one-1111",
+        GEMINI_API_KEY_2="key-two-2222",
+        GEMINI_API_KEY_3="key-three-3333",
+    )
+    pool = settings.provider_key_pool()
+    assert len(pool["gemini"]) == 3
+    assert pool["gemini"][0] == "key-one-1111"
+
+
+def test_pool_does_not_duplicate_plain_and_numbered(monkeypatch):
+    """GEMINI_API_KEY and GEMINI_API_KEY_1 mean the same slot."""
+    settings = _settings_with_pool(
+        monkeypatch, GEMINI_API_KEY="same-key-9999", GEMINI_API_KEY_1="same-key-9999"
+    )
+    assert settings.provider_key_pool()["gemini"] == ["same-key-9999"]
+
+
+def test_key_pool_rotates_and_masks(monkeypatch):
+    from app.llm.key_pool import build_key_pool
+
+    settings = _settings_with_pool(
+        monkeypatch, GEMINI_API_KEY="aaaa-1111", GEMINI_API_KEY_2="bbbb-2222"
+    )
+    pool = build_key_pool(settings, state_file=None)
+    assert pool.active("gemini").mask() == "****1111"
+    nxt = pool.rotate("gemini", Exception("429 rate limit"))
+    assert nxt.mask() == "****2222"
+
+
+def test_key_pool_never_returns_a_full_key_in_status(monkeypatch):
+    from app.llm.key_pool import build_key_pool
+
+    settings = _settings_with_pool(monkeypatch, GEMINI_API_KEY="supersecretkey-abcd")
+    pool = build_key_pool(settings, state_file=None)
+    for line in pool.status_lines():
+        assert "supersecretkey-abcd" not in line
+        assert "abcd" in line
+
+
+def test_numbered_keys_are_redacted(monkeypatch):
+    """A key only reachable via GEMINI_API_KEY_2 must still be scrubbed."""
+    settings = _settings_with_pool(monkeypatch, GEMINI_API_KEY_2="hidden-key-7777")
+    assert "hidden-key-7777" in settings.secret_values()
+
+
+def test_rate_limit_detection_separates_throttle_from_bad_key():
+    from app.llm.key_pool import looks_like_rate_limit
+
+    assert looks_like_rate_limit(Exception("Error 429: rate limit exceeded"))
+    assert looks_like_rate_limit(Exception("Resource exhausted: quota"))
+    assert not looks_like_rate_limit(Exception("Invalid API key provided"))

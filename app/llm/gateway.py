@@ -21,6 +21,7 @@ from typing import Any
 from app.core.errors import InvalidApiKeyError, MissingSecretError, ProviderUnavailableError
 from app.core.logging_setup import get_logger
 from app.core.utils import run_blocking
+from app.llm.key_pool import looks_like_rate_limit
 from app.llm.tokens import count_message_tokens, trim_messages
 
 log = get_logger(__name__)
@@ -105,10 +106,11 @@ def _export_provider_env(provider: str, settings) -> None:
 
 
 class LLMGateway:
-    def __init__(self, settings, budget=None):
+    def __init__(self, settings, budget=None, key_pool=None):
         self.settings = settings
         self.budget = budget
         self._litellm = None
+        self.key_pool = key_pool
 
     # ------------------------------------------------------------------
     def _import(self):
@@ -145,6 +147,30 @@ class LLMGateway:
                 out.append((provider, model))
         return out
 
+    def _apply_pool_key(self, provider: str) -> None:
+        """Point the provider's env var at the pool's currently active key."""
+        if not self.key_pool:
+            _export_provider_env(provider, self.settings)
+            return
+        state = self.key_pool.active(provider)
+        if state is None:
+            _export_provider_env(provider, self.settings)
+            return
+        names = {
+            "groq": "GROQ_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+            "hf": "HF_TOKEN",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "custom": "CUSTOM_LLM_API_KEY",
+        }
+        env_name = names.get(provider)
+        if env_name:
+            os.environ[env_name] = state.key
+        if provider == "hf":
+            os.environ["HUGGINGFACE_API_KEY"] = state.key
+
     def require_ready(self) -> None:
         if not self.available():
             raise MissingSecretError(
@@ -176,7 +202,10 @@ class LLMGateway:
         last_error: Exception | None = None
 
         for provider, model in self.candidates(tier):
-            _export_provider_env(provider, self.settings)
+            # Pick the active key from the pool and force it into the env var
+            # LiteLLM reads. ``setdefault`` would keep a benched key alive after
+            # the first call, so overwrite explicitly.
+            self._apply_pool_key(provider)
             for attempt in range(self.settings.llm_max_retries + 1):
                 started = time.monotonic()
                 try:
@@ -201,6 +230,8 @@ class LLMGateway:
                     )
                     if self.budget and user_id:
                         await self.budget.record(user_id, model, p_tokens, c_tokens)
+                    if self.key_pool:
+                        self.key_pool.record_use(provider)
                     log.info(
                         "llm ok",
                         extra={
@@ -228,6 +259,16 @@ class LLMGateway:
                         attempt,
                         exc,
                     )
+                    # A throttled key is not a broken provider. Bench it, swap
+                    # in the next one, and retry here before falling through -
+                    # otherwise one exhausted free tier takes the whole
+                    # provider out even though a healthy key sits idle.
+                    if self.key_pool and looks_like_rate_limit(exc):
+                        next_state = self.key_pool.rotate(provider, exc)
+                        if next_state is not None and self.key_pool.slots(provider) > 1:
+                            attempts.append(f"{provider}:rotate->{next_state.label()}")
+                            self._apply_pool_key(provider)
+                            continue
                     if attempt < self.settings.llm_max_retries:
                         await asyncio.sleep(min(2.0, 0.5 * (2**attempt)))
                     else:
@@ -321,8 +362,8 @@ class LLMGateway:
         return str(content)
 
 
-def build_gateway(settings, budget=None) -> LLMGateway:
-    return LLMGateway(settings, budget=budget)
+def build_gateway(settings, budget=None, key_pool=None) -> LLMGateway:
+    return LLMGateway(settings, budget=budget, key_pool=key_pool)
 
 
 _AUTH_FAILURE_MARKERS = (

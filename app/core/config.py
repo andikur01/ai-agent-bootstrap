@@ -163,6 +163,42 @@ class Settings(BaseSettings):
             "custom": self.custom_llm_api_key,
         }
 
+    def provider_key_pool(self) -> dict[str, list[str]]:
+        """Every key per provider, in order.
+
+        A provider can be configured with several keys so one running out of
+        free quota does not silence the bot. The plain var counts as slot 1 and
+        numbered vars extend it:
+
+            GEMINI_API_KEY=...        -> slot 1
+            GEMINI_API_KEY_1=...      -> slot 1 (same as above)
+            GEMINI_API_KEY_2=...      -> slot 2
+        """
+        import os
+
+        env_names = {
+            "groq": "GROQ_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+            "hf": "HF_TOKEN",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "custom": "CUSTOM_LLM_API_KEY",
+        }
+        base = self.provider_keys()
+        pool: dict[str, list[str]] = {}
+        for provider, env_name in env_names.items():
+            keys: list[str] = []
+            for candidate in [base.get(provider, "")] + [
+                os.environ.get(f"{env_name}_{i}", "") for i in range(1, 11)
+            ]:
+                candidate = (candidate or "").strip()
+                if candidate and candidate not in keys:
+                    keys.append(candidate)
+            if keys:
+                pool[provider] = keys
+        return pool
+
     def available_providers(self) -> list[str]:
         keys = self.provider_keys()
         order = [p for p in self.llm_fallback_order if keys.get(p)]
@@ -173,6 +209,10 @@ class Settings(BaseSettings):
     def secret_values(self) -> list[str]:
         """All non-empty secret-ish values, used by the redaction layer."""
         values = [v for v in self.provider_keys().values() if v and len(v) >= 8]
+        # Numbered pool keys never reach provider_keys(), so add them here or
+        # they would slip through redaction and land in a log.
+        for keys in self.provider_key_pool().values():
+            values += [k for k in keys if k and len(k) >= 8]
         for extra in (
             self.telegram_bot_token,
             self.tavily_api_key,

@@ -60,6 +60,7 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "`/pikir` <topik> - Analisis mendalam 5 langkah\n"
         "`/belajar` <topik> - Cari di internet, rangkum, simpan permanen\n"
         "`/memori` - Statistik memori & token terpakai\n"
+        "`/keys` - Status key pool & sisa quota\n"
         "`/feedback` <pesan> - Catat saranmu",
     ),
     "creative": (
@@ -590,6 +591,20 @@ class TelegramBot:
             await update.effective_message.reply_text("Pikir tentang apa? Contoh: /pikir kenapa langit biru")
             return
         await self._run_confirmed(update, context, Intent.THINK, {"text": question})
+
+    async def cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pool = getattr(self.gateway, "key_pool", None)
+        if pool is None:
+            await update.message.reply_text("Key pool belum aktif.")
+            return
+        lines = ["🔑 *Key Pool*", ""]
+        lines += pool.status_lines()
+        lines += [
+            "",
+            "Tambah key: isi `GEMINI_API_KEY_2`, `_3`, dst di `.env`, lalu restart.",
+            "Key disimpan hanya di `.env` — tidak pernah dikirim ke chat.",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def cmd_memori(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_confirmed(update, context, Intent.MEMORY_QUERY, {"mode": "stats"})

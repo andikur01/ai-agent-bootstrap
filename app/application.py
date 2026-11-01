@@ -17,6 +17,7 @@ from app.db.store import Store
 from app.llm.budget import BudgetGuard
 from app.llm.cache import SemanticCache
 from app.llm.gateway import LLMGateway
+from app.llm.key_pool import build_key_pool
 from app.memory.artifacts import ArtifactRegistry
 from app.memory.embeddings import build_embedder
 from app.memory.manager import MemoryManager
@@ -61,6 +62,7 @@ class Application:
             BotCommand("pikir", "Analisis mendalam"),
             BotCommand("belajar", "Cari & simpan pengetahuan"),
             BotCommand("memori", "Statistik memori & token"),
+            BotCommand("keys", "Status key pool & quota"),
             BotCommand("buat_gambar", "Generate gambar"),
             BotCommand("edit_gambar", "Edit gambar terakhir"),
             BotCommand("buat_video", "Buat video"),
@@ -103,7 +105,8 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     vectors = build_vector_store(settings, store, embedder)
     registry = ArtifactRegistry(store)
     budget = BudgetGuard(store, settings.daily_token_budget)
-    gateway = LLMGateway(settings, budget=budget)
+    key_pool = build_key_pool(settings, state_file=settings.data_path / "key_pool.json")
+    gateway = LLMGateway(settings, budget=budget, key_pool=key_pool)
     memory = MemoryManager(store, vectors, registry, settings, gateway=gateway)
     cache = SemanticCache(
         store, embedder, enabled=settings.semantic_cache_enabled
@@ -206,6 +209,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("buat_web_full", bot.cmd_buat_web_full))
     app.add_handler(CommandHandler("perbaiki_web", bot.cmd_perbaiki_web))
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
+    app.add_handler(CommandHandler("keys", bot.cmd_keys))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))
