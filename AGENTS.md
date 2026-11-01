@@ -68,3 +68,48 @@ Alur satu pesan: `route -> resolve reference -> confirm (heavy saja) -> execute 
 - `/menu` isinya data (`MENU_SECTIONS`), bukan string raksasa, supaya bisa diuji
   tanpa koneksi Telegram. `tests/test_menu.py` menguji isi menu, routing tombol,
   alias command, dan guard.
+
+## Pitfalls found in production (read before editing the LLM path)
+
+**Never put reserved LogRecord keys in `extra=`.** `extra={"module": "llm"}`
+raises `KeyError: Attempt to overwrite 'module' in LogRecord` on Python 3.13.
+Inside `complete()` that KeyError was caught by the provider-failure handler, so
+every *successful* reply was reported as a failed provider. Use `component=`.
+`tests/test_regressions.py` scans `app/` for reserved keys, so this cannot come
+back silently.
+
+**Groq model names rot.** `llama-3.1-8b-instant` and `llama-3.3-70b-versatile`
+are gone; Groq now serves `openai/gpt-oss-20b` and `openai/gpt-oss-120b`. Check
+`GET https://api.groq.com/openai/v1/models` with a real key before assuming a
+model still exists - a dead name fails *every* call with `model_not_found`.
+
+**Reasoning models need output headroom.** `gpt-oss`, `deepseek-reasoner` and
+friends spend output tokens on hidden reasoning first. Callers that pass a small
+`max_tokens` (the memory resolver uses 60, intent routing similar) get back an
+empty string. `_needs_reasoning_floor()` in `gateway.py` raises the cap to
+`REASONING_MIN_OUTPUT`, and an empty completion is raised as a retryable error
+rather than returned as the answer.
+
+**A provider with a key but absent from `LLM_FALLBACK_ORDER` is ignored.**
+`available_providers()` appends such providers after the configured order, so a
+key added via `/keys add` always takes effect. Without this the user adds a
+DeepSeek key and nothing changes.
+
+## Verifying a new key end to end
+
+```bash
+# 1. does the provider accept it?
+curl -s -H "Authorization: Bearer $KEY" https://api.groq.com/openai/v1/models
+# 2. does the app get a real reply through it?
+PYTHONPATH=. .venv/bin/python -c "
+import asyncio; from app.core.config import get_settings
+from app.application import build_app
+async def m():
+    app = await build_app(get_settings())
+    r = await app.orchestrator.gateway.complete([{'role':'user','content':'Balas: halo'}], tier='small')
+    print(r.provider, r.model, repr(r.text)); await app.stop()
+asyncio.run(m())"
+```
+
+Keys live in `.env` only, which is gitignored. `/keys add <provider> <key>` in
+Telegram validates, stores and activates a key without a restart.
