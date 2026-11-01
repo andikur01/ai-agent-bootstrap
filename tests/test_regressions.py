@@ -407,3 +407,111 @@ def test_new_provider_joins_order_even_if_not_in_fallback_list(monkeypatch):
     order = settings.available_providers()
     assert "deepseek" in order
     assert order.index("groq") < order.index("deepseek")
+
+
+# ---------------------------------------------------------------------------
+# Provider call path: logging, model names, reasoning budget.
+# ---------------------------------------------------------------------------
+
+def test_logging_extra_never_uses_reserved_logrecord_keys():
+    """extra={"module": ...} raises KeyError on Python 3.13.
+
+    That KeyError happened inside the success branch of complete(), so a good
+    call was reported as a failed provider and the user got an error.
+    """
+    import re
+    from pathlib import Path
+
+    reserved = {"module", "name", "msg", "args", "levelname", "message"}
+    offenders = []
+    for path in Path("app").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"extra=\{([^}]*)\}", text, re.DOTALL):
+            for key in re.findall(r'"([a-z_]+)"\s*:', match.group(1)):
+                if key in reserved:
+                    offenders.append(f"{path}:{key}")
+    assert not offenders, f"reserved LogRecord keys in extra=: {offenders}"
+
+
+def test_redaction_filter_survives_reserved_extra():
+    """The formatter must still work when a record carries a component field."""
+    import logging
+
+    from app.core.logging_setup import JsonFormatter, RedactionFilter
+
+    record = logging.LogRecord("t", logging.INFO, __file__, 1, "llm ok", None, None)
+    record.component = "llm"
+    record.user_id = 7
+    RedactionFilter().filter(record)
+    payload = JsonFormatter().format(record)
+    assert "llm ok" in payload
+    assert "component" in payload
+
+
+def test_groq_models_are_current():
+    """Groq retired llama-3.1-8b-instant; a dead model name breaks every reply."""
+    from app.llm.gateway import TIER_MODELS
+
+    assert "llama-3.1-8b-instant" not in TIER_MODELS["small"]["groq"]
+    assert "llama-3.3-70b-versatile" not in TIER_MODELS["big"]["groq"]
+
+
+def test_reasoning_models_get_a_minimum_output_budget():
+    """gpt-oss thinks before answering; a small cap yields empty text."""
+    from app.llm.gateway import REASONING_MIN_OUTPUT, _needs_reasoning_floor
+
+    assert _needs_reasoning_floor("groq/openai/gpt-oss-20b")
+    assert _needs_reasoning_floor("deepseek/deepseek-reasoner")
+    assert not _needs_reasoning_floor("groq/llama-3.1-8b-instant")
+    assert REASONING_MIN_OUTPUT >= 500
+
+
+def test_empty_completion_is_retried_not_returned(monkeypatch):
+    """An empty reply must not be handed to the user as success."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.llm.gateway import LLMGateway
+
+    calls = {"n": 0}
+
+    async def fake_acompletion(**kwargs):
+        calls["n"] += 1
+        # First call: reasoning burned the budget, no text. Second: real answer.
+        content = "" if calls["n"] == 1 else "halo"
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=5),
+        )
+
+    class FakeSettings:
+        llm_max_retries = 1
+        llm_timeout_seconds = 5
+        small_model = "groq/openai/gpt-oss-20b"
+        big_model = "groq/openai/gpt-oss-20b"
+
+        def available_providers(self):
+            return ["groq"]
+
+        def provider_key_pool(self):
+            return {"groq": ["gsk_" + "x" * 40]}
+
+        groq_api_key = "gsk_" + "x" * 40
+        gemini_api_key = ""
+        openrouter_api_key = ""
+        hf_token = ""
+        openai_api_key = ""
+        anthropic_api_key = ""
+        deepseek_api_key = ""
+        cerebras_api_key = ""
+        mistral_api_key = ""
+        custom_llm_api_key = ""
+        custom_llm_base_url = ""
+
+    gw = LLMGateway(FakeSettings())
+    monkeypatch.setattr(gw, "_import", lambda: fake_acompletion)
+    result = asyncio.run(
+        gw.complete([{"role": "user", "content": "halo"}], tier="small", max_tokens=10)
+    )
+    assert result.text == "halo"
+    assert calls["n"] >= 2

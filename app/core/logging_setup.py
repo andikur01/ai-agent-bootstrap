@@ -56,7 +56,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("user_id", "task", "module", "duration_ms", "status", "extra"):
+        for key in ("user_id", "task", "component", "duration_ms", "status", "extra"):
             value = record.__dict__.get(key)
             if value is not None:
                 payload[key] = value
@@ -71,7 +71,7 @@ class TextFormatter(logging.Formatter):
         message = record.getMessage()
         extras = [
             f"{k}={record.__dict__[k]}"
-            for k in ("user_id", "task", "module", "status")
+            for k in ("user_id", "task", "component", "status")
             if record.__dict__.get(k) is not None
         ]
         line = base + message + (" | " + " ".join(extras) if extras else "")

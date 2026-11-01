@@ -68,8 +68,8 @@ class Settings(BaseSettings):
             "anthropic",
         ]
     )
-    small_model: str = "groq/llama-3.1-8b-instant"
-    big_model: str = "groq/llama-3.3-70b-versatile"
+    small_model: str = "groq/openai/gpt-oss-20b"
+    big_model: str = "groq/openai/gpt-oss-120b"
     daily_token_budget: int = 200_000
     semantic_cache_enabled: bool = True
     llm_timeout_seconds: int = 60

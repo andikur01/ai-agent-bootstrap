@@ -29,7 +29,7 @@ log = get_logger(__name__)
 # Logical tier -> per-provider model, tried in the user's configured order.
 TIER_MODELS: dict[str, dict[str, str]] = {
     "small": {
-        "groq": "groq/llama-3.1-8b-instant",
+        "groq": "groq/openai/gpt-oss-20b",
         "gemini": "gemini/gemini-2.0-flash-lite",
         "openrouter": "openrouter/meta-llama/llama-3.1-8b-instruct",
         "hf": "huggingface/meta-llama/Meta-Llama-3-8B-Instruct",
@@ -41,7 +41,7 @@ TIER_MODELS: dict[str, dict[str, str]] = {
         "custom": "openai/local-small",
     },
     "big": {
-        "groq": "groq/llama-3.3-70b-versatile",
+        "groq": "groq/openai/gpt-oss-120b",
         "gemini": "gemini/gemini-2.0-flash",
         "openrouter": "openrouter/meta-llama/llama-3.3-70b-instruct",
         "hf": "huggingface/meta-llama/Meta-Llama-3-70B-Instruct",
@@ -57,6 +57,25 @@ TIER_MODELS: dict[str, dict[str, str]] = {
 # Prompt budget per tier (input side). Output is capped separately.
 TIER_PROMPT_BUDGET = {"small": 6000, "big": 24000}
 TIER_MAX_OUTPUT = {"small": 1200, "big": 4000}
+
+# Reasoning models spend output tokens on hidden thinking before they emit any
+# text. Give them a small cap and they think until the budget is gone and return
+# an empty string - which looks like a broken model but is really a starved one.
+REASONING_MODEL_MARKERS = (
+    "gpt-oss",
+    "o1",
+    "o3",
+    "o4",
+    "deepseek-reasoner",
+    "qwen3",
+    "thinking",
+)
+REASONING_MIN_OUTPUT = 900
+
+
+def _needs_reasoning_floor(model: str) -> bool:
+    lowered = model.lower()
+    return any(marker in lowered for marker in REASONING_MODEL_MARKERS)
 
 
 @dataclass
@@ -209,7 +228,6 @@ class LLMGateway:
         prepared = trim_messages(messages, budget_tokens)
         prompt_tokens = count_message_tokens(prepared)
         output_cap = max_tokens or TIER_MAX_OUTPUT.get(tier, 1200)
-
         attempts: list[str] = []
         last_error: Exception | None = None
 
@@ -218,6 +236,9 @@ class LLMGateway:
             # LiteLLM reads. ``setdefault`` would keep a benched key alive after
             # the first call, so overwrite explicitly.
             self._apply_pool_key(provider)
+            model_cap = output_cap
+            if _needs_reasoning_floor(model):
+                model_cap = max(output_cap, REASONING_MIN_OUTPUT)
             for attempt in range(self.settings.llm_max_retries + 1):
                 started = time.monotonic()
                 try:
@@ -225,7 +246,7 @@ class LLMGateway:
                         "model": model,
                         "messages": prepared,
                         "temperature": temperature,
-                        "max_tokens": output_cap,
+                        "max_tokens": model_cap,
                         "timeout": self.settings.llm_timeout_seconds,
                     }
                     if json_mode:
@@ -235,6 +256,13 @@ class LLMGateway:
                         timeout=self.settings.llm_timeout_seconds + 10,
                     )
                     text = self._extract_text(response)
+                    if not text.strip():
+                        # A reasoning model that ran out of output budget returns
+                        # empty text. Retrying with more room beats handing the
+                        # user a blank message.
+                        raise RuntimeError(
+                            "model returned empty text (output budget exhausted?)"
+                        )
                     usage = getattr(response, "usage", None)
                     p_tokens = int(getattr(usage, "prompt_tokens", 0) or prompt_tokens)
                     c_tokens = int(
@@ -244,11 +272,14 @@ class LLMGateway:
                         await self.budget.record(user_id, model, p_tokens, c_tokens)
                     if self.key_pool:
                         self.key_pool.record_use(provider)
+                    # "module" is a reserved LogRecord attribute; passing it in
+                    # extra raises KeyError and, inside this try block, made a
+                    # successful call look like a failed provider.
                     log.info(
                         "llm ok",
                         extra={
                             "user_id": user_id,
-                            "module": "llm",
+                            "component": "llm",
                             "duration_ms": int((time.monotonic() - started) * 1000),
                             "status": "ok",
                         },
