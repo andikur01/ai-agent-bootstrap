@@ -1175,3 +1175,53 @@ def test_a_missing_download_is_not_reported(tmp_path):
     orch = Orchestrator.__new__(Orchestrator)
     orch.browser = FakeBrowser()
     assert orch._collect_download() == ([], "")
+
+
+# ---------------------------------------------------------------------------
+# "bikin video di flow" must go to the browser, not the local renderer. The
+# local path would quietly produce a slideshow instead of using the site the
+# user named - wrong output, no error, hard to notice.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("buatkan video di flow.google.com tentang kucing", "browse"),
+        ("bikin video di runway", "browse"),
+        ("bikin poster di canva", "browse"),
+        ("buatkan gambar poster di canva.com", "browse"),
+        ("buka akun aku di flow lalu buatkan video kucing", "browse"),
+        ("buka google flow dan buatkan video", "browse"),
+        ("buka https://flow.google.com dan bikin video kucing", "browse"),
+        # A request with no named place still renders locally.
+        ("buat video kucing", "video_create"),
+        ("buatkan video penjelasan kopi", "video_create"),
+        ("bikin animasi matematika", "video_create"),
+    ],
+)
+def test_a_named_site_routes_to_the_browser(text, expected):
+    from app.core.intent import classify_rules
+
+    route = classify_rules(text)
+    assert route is not None, f"no route for {text!r}"
+    assert route.intent.value == expected, f"{text!r} -> {route.intent.value}"
+
+
+def test_a_named_site_is_turned_into_a_url():
+    """A bare site name has to become a URL the browser can open."""
+    from app.core.intent import classify_rules
+
+    route = classify_rules("bikin video di runway")
+    assert route.intent.value == "browse"
+    assert route.args["urls"], "must carry a URL for the browser"
+    assert route.args["urls"][0].startswith("https://")
+
+
+def test_a_named_site_routes_even_without_a_dot():
+    from app.core.intent import KNOWN_SITES, classify_rules
+
+    for name in ("flow", "sora", "canva", "suno"):
+        route = classify_rules(f"bikin video di {name}")
+        assert route is not None and route.intent.value == "browse", name
+        assert name in KNOWN_SITES

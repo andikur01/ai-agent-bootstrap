@@ -21,6 +21,66 @@ from app.core.logging_setup import get_logger
 log = get_logger(__name__)
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+# A site named without a scheme, e.g. "flow.google.com" or "canva.com".
+# Matched separately because people name a site far more often than they paste
+# a full URL, and without this "buat video di flow.google.com" reads as a plain
+# local video request.
+SITE_RE = re.compile(
+    r"\b((?:[a-z0-9][a-z0-9-]*\.)+(?:com|net|org|io|ai|co|id|dev|app|me|xyz|tv|so|gg))\b",
+    re.I,
+)
+
+# Verbs that mean "do this over there", and the things worth doing there.
+_WORK_VERBS = re.compile(
+    r"\b(buat(kan)?|bikin|generate|produksi|render|susun|tulis|edit|ubah|"
+    r"perbaiki|upload|unggah|posting|kirim)\b",
+    re.I,
+)
+_WORK_NOUNS = re.compile(
+    r"\b(video|animasi|klip|gambar|image|foto|poster|logo|suara|audio|musik|"
+    r"lagu|voice|website|situs|web|artikel|dokumen|presentasi|slide)\b",
+    re.I,
+)
+_OPEN_VERBS = re.compile(
+    r"\b(buka|browse|jelajahi|operasikan|klik|login|masuk|pakai akun|"
+    r"gunakan akun|akun aku|akun saya)\b",
+    re.I,
+)
+
+# Generation and editing sites people name without a domain: "bikin video di
+# flow". Without this the request looks identical to a local one and the agent
+# would quietly render a slideshow instead of using the tool that was asked for.
+KNOWN_SITES: dict[str, str] = {
+    "flow": "https://labs.google/fx/tools/flow",
+    "google flow": "https://labs.google/fx/tools/flow",
+    "veo": "https://labs.google/fx/tools/flow",
+    "sora": "https://sora.com",
+    "runway": "https://runwayml.com",
+    "pika": "https://pika.art",
+    "kling": "https://klingai.com",
+    "luma": "https://lumalabs.ai",
+    "hailuo": "https://hailuoai.video",
+    "canva": "https://www.canva.com",
+    "capcut": "https://www.capcut.com",
+    "figma": "https://www.figma.com",
+    "elevenlabs": "https://elevenlabs.io",
+    "suno": "https://suno.com",
+    "udio": "https://www.udio.com",
+    "midjourney": "https://www.midjourney.com",
+    "leonardo": "https://leonardo.ai",
+    "ideogram": "https://ideogram.ai",
+    "chatgpt": "https://chatgpt.com",
+    "gemini": "https://gemini.google.com",
+    "claude": "https://claude.ai",
+    "notion": "https://www.notion.so",
+    "gamma": "https://gamma.app",
+}
+
+_KNOWN_SITE_RE = re.compile(
+    r"\b(" + "|".join(sorted((re.escape(k) for k in KNOWN_SITES), key=len, reverse=True)) + r")\b",
+    re.I,
+)
 YT_RE = re.compile(
     r"(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|facebook\.com|fb\.watch|"
     r"twitter\.com|x\.com|vimeo\.com|dailymotion\.com|twitch\.tv)",
@@ -313,6 +373,38 @@ def classify_rules(text: str, *, has_photo: bool = False, has_voice: bool = Fals
         return Route(Intent.CONTINUE, {"text": stripped}, confidence=0.9)
 
     urls = URL_RE.findall(stripped)
+    sites = SITE_RE.findall(stripped)
+    known = _KNOWN_SITE_RE.search(stripped)
+
+    # Where the work should happen, if the user named a place.
+    target_site = ""
+    if urls:
+        target_site = urls[0]
+    elif sites:
+        target_site = f"https://{sites[0]}"
+    elif known:
+        target_site = KNOWN_SITES[known.group(1).lower()]
+
+    # "buat video di flow" is not a request for a local render. The work has to
+    # happen on that site, in a browser, behind whatever login it wants - so it
+    # is routed there rather than to the local video pipeline. Without this the
+    # agent would quietly make a slideshow instead of using the tool the user
+    # named, which is the opposite of helpful and hard to notice.
+    if target_site and (_WORK_VERBS.search(stripped) and _WORK_NOUNS.search(stripped)):
+        return Route(
+            Intent.BROWSE,
+            {"text": stripped, "urls": [target_site]},
+            confidence=0.9,
+        )
+
+    # A named place plus "open it / use my account" is still browser work.
+    if target_site and _OPEN_VERBS.search(stripped) and not urls:
+        return Route(
+            Intent.BROWSE,
+            {"text": stripped, "urls": [target_site]},
+            confidence=0.8,
+        )
+
     # An explicit "operate this page" verb outranks plain link ingestion: the
     # user wants the agent to click and type, not just summarise.
     if urls and re.search(r"\b(buka|browse|jelajahi|operasikan|klik|login)\b", stripped, re.I):
