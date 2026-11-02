@@ -203,3 +203,17 @@ publishes two ports. `SiteHost` serves generated sites there and needs no token,
 which is the only provider that works with a fine-grained GitHub token that
 cannot create repositories. Reuse the host started at boot - a second one tries
 to bind a port that is already taken and fails silently.
+
+**A one-time-code screen is not a sign-in wall, and treating it as one loses the
+task.** The harvester tested for the wall by looking for sign-in wording, so an
+OTP page - which says "verify", not "sign in" - was read as "user is not logged
+in" and the task ended one step short of the key. Detect the code screen by its
+input field (`_needs_verification`), and hand the code to the user through
+`HandoffService` instead of stopping.
+
+**A question to the user is not a confirmation.** `ConfirmationGate` answers
+yes/no and is checked before a task starts; a verification code arrives *while*
+a task is running and is free text. They are separate services for that reason.
+Route the reply in `on_message` before the confirmation gate, and only consume
+a message when someone is actually waiting - a slash command must still route,
+or a user who changes their mind is stuck answering a question forever.

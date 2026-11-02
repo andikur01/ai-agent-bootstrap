@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     # How many observe/act steps the agent may take on one page before it stops.
     browser_max_steps: int = 8
     browser_login_seconds: int = 240
+    # How long a task waits for the user to send a verification code before it
+    # gives up. Too short and a real code arrives late; too long and a task
+    # nobody is watching holds the worker.
+    handoff_timeout_seconds: int = 300
     # Public URL of the noVNC page, so /live can hand the user a link.
     live_view_host: str = ""
     live_view_port: int = 12001
