@@ -46,10 +46,41 @@ class Application:
             await self.telegram_app.initialize()
             await self._publish_commands()
             await self.telegram_app.start()
+            # drop_pending_updates must stay False. With True, every message the
+            # user sent while the bot was down is deleted on startup - which is
+            # exactly what happened: they wrote from their phone, got silence,
+            # and the message was gone before the bot came back. A short backlog
+            # after a restart is far better than losing the message entirely.
             await self.telegram_app.updater.start_polling(
-                drop_pending_updates=True, allowed_updates=["message", "callback_query"]
+                drop_pending_updates=False, allowed_updates=["message", "callback_query"]
             )
+            await self._announce_startup()
         log.info("application started")
+
+    async def _announce_startup(self) -> None:
+        """Tell the user the bot is up, so silence is never ambiguous.
+
+        A bot that restarts silently looks identical to a bot that is down. One
+        short message per start removes that doubt, and it doubles as proof that
+        the restart-on-crash unit is actually working.
+        """
+        settings = self.settings
+        if not getattr(settings, "notify_on_start", True):
+            return
+        for user_id in settings.telegram_allowed_user_ids[:3]:
+            try:
+                await self.telegram_app.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "🟢 *Bot hidup lagi.*\n\n"
+                        "Pesan yang kamu kirim waktu bot mati tetap aku terima — "
+                        "aku balas sekarang.\n\n"
+                        "Cek cepat: `/status` atau `/stok`"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed notice is not fatal
+                log.debug("startup notice to %s failed: %s", user_id, exc)
 
     async def _publish_commands(self) -> None:
         """Register the command list so Telegram shows its native menu button."""
@@ -267,6 +298,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("browse", bot.cmd_browse))
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
     app.add_handler(CommandHandler("stok", bot.cmd_stok))
+    app.add_handler(CommandHandler("disk", bot.cmd_disk))
     app.add_handler(CommandHandler("akun", bot.cmd_akun))
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))

@@ -1,0 +1,51 @@
+[Unit]
+Description=Telegram AI Agent
+Documentation=file:///opt/ai-agent-bootstrap/DEPLOY.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/opt/ai-agent-bootstrap
+
+# The bot reads its secrets from .env, which is not committed and not readable
+# by anyone but the service user.
+EnvironmentFile=/opt/ai-agent-bootstrap/.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/ai-agent-bootstrap/.venv/bin/python main.py
+
+# This is what makes it 24/7. Without Restart=always a crash, an OOM kill or a
+# reboot leaves the bot down until someone notices - which is exactly what
+# happened: the user messaged from their phone and got silence.
+Restart=always
+RestartSec=5
+
+# Give up only if it keeps dying instantly, which means a config error that a
+# restart cannot fix.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Graceful shutdown: SIGTERM lets the bot finish the task in flight.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Memory ceiling. A runaway render or a browser left open should be killed and
+# restarted rather than dragging the whole machine into swap.
+MemoryMax=3G
+MemoryHigh=2500M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-agent
+
+# Hardening. The bot needs to write data/ and outputs/ and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ai-agent-bootstrap/data /opt/ai-agent-bootstrap/outputs
+
+[Install]
+WantedBy=multi-user.target

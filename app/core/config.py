@@ -77,6 +77,18 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
 
+    # ---------- Disk retention ----------
+    # A 24/7 bot generates images and video forever, and a full disk stops it
+    # dead. Old generated files are deleted past these limits; saved logins, the
+    # memory database and the newest files are never touched.
+    outputs_max_mb: int = 2048
+    outputs_max_age_days: int = 14
+    retention_enabled: bool = True
+    retention_interval_hours: int = 6
+    # A silent restart is indistinguishable from a bot that is down, so the bot
+    # says hello once per start.
+    notify_on_start: bool = True
+
     # ---------- Browser agent ----------
     # How many observe/act steps the agent may take on one page before it stops.
     browser_max_steps: int = 8

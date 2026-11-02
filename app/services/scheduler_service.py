@@ -157,8 +157,40 @@ class SchedulerService:
         self._scheduler.start()
         for row in await self.store.active_schedules():
             self._register_row(row)
+        self._register_retention()
         log.info("scheduler started with %s jobs", len(self._job_ids))
         return True
+
+    def _register_retention(self) -> None:
+        """Sweep old generated files on a timer.
+
+        Without this a 24/7 bot fills its disk with its own output and stops.
+        The sweep is periodic rather than on-every-write so a burst of renders
+        cannot trigger repeated scans of the whole tree.
+        """
+        if not getattr(self.settings, "retention_enabled", True):
+            return
+        from app.services.retention import build_retention
+
+        retention = build_retention(self.settings)
+        hours = max(1, int(getattr(self.settings, "retention_interval_hours", 6)))
+
+        def _sweep() -> None:
+            try:
+                report = retention.sweep()
+                if report.deleted:
+                    log.info("retention sweep: %s", report.summary())
+            except Exception as exc:  # noqa: BLE001 - never kill the scheduler
+                log.warning("retention sweep failed: %s", exc)
+
+        self._scheduler.add_job(
+            _sweep,
+            "interval",
+            hours=hours,
+            id="disk-retention",
+            replace_existing=True,
+        )
+        log.info("disk retention every %sh (limit %s MB)", hours, self.settings.outputs_max_mb)
 
     async def shutdown(self) -> None:
         if self._scheduler is not None:

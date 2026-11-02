@@ -125,6 +125,7 @@ HELP_EXTRA = (
     "`/keys auto` <provider> - Ambil key otomatis\n"
     "`/keys add` <provider> <key> - Kirim manual\n"
     "`/stok` - Stok token nyata (dihitung, bukan karangan)\n"
+    "`/disk` - Cek penyimpanan, `/disk bersih` untuk bersihkan\n"
     "Ketik: `ambil key di situsbaru.com` - aku cari di situs mana pun\n"
     "Ketik: `simpan <key>` - baru aku masukkan ke .env\n\n"
     "💬 *CHAT*\n\n"
@@ -1339,6 +1340,29 @@ class TelegramBot:
             f"`simpan semua di {host}`",
         ]
         await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_disk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show how full the outputs directory is, and clean it on request."""
+        from app.services.retention import build_retention
+
+        retention = build_retention(self.settings)
+        text = context.args[0].lower() if context.args else ""
+
+        if text in ("bersih", "clean", "bersihin"):
+            report = retention.sweep(force=True)
+            await update.effective_message.reply_text(
+                f"{report.summary()}\n\n{retention.status()}", parse_mode="Markdown"
+            )
+            return
+
+        await update.effective_message.reply_text(
+            f"💾 *Penyimpanan*\n\n{retention.status()}\n\n"
+            "Aku bersihkan otomatis tiap "
+            f"{self.settings.retention_interval_hours} jam.\n"
+            "Login tersimpan, memory, dan file terbaru *tidak pernah* aku hapus.\n\n"
+            "Mau bersihkan sekarang? Ketik `/disk bersih`",
+            parse_mode="Markdown",
+        )
 
     async def cmd_stok(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Report the real token stock, counted from stored keys.
