@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config cmake build-essential \
         libcairo2-dev libpango1.0-dev \
         espeak-ng \
-        xvfb x11vnc novnc websockify x11-apps \
+        xvfb x11vnc novnc websockify x11-apps scrot \
         fonts-dejavu-core fonts-noto-color-emoji \
         curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

@@ -15,13 +15,13 @@ say "1/3  Paket sistem (butuh sudo)"
 if command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update -qq
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ffmpeg xvfb x11vnc novnc websockify x11-apps \
+        ffmpeg xvfb x11vnc novnc websockify x11-apps scrot \
         fonts-dejavu-core fonts-noto-color-emoji \
         curl ca-certificates
     echo "selesai"
 else
     echo "apt-get tidak ada. Lewati; install manual:"
-    echo "  ffmpeg xvfb x11vnc novnc websockify x11-apps"
+    echo "  ffmpeg xvfb x11vnc novnc websockify x11-apps scrot"
 fi
 
 say "2/3  Browser Chromium untuk Playwright"
@@ -34,7 +34,7 @@ fi
 
 say "3/3  Cek semuanya"
 missing=0
-for tool in ffmpeg Xvfb x11vnc websockify xwd; do
+for tool in ffmpeg Xvfb x11vnc websockify xwd scrot; do
     if command -v "$tool" >/dev/null 2>&1; then
         printf '  ok    %s\n' "$tool"
     else

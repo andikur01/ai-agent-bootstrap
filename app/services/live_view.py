@@ -73,13 +73,23 @@ def _live_view_owner(env: bytes) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Is the process still running? A zombie counts as dead.
+
+    This matters: the watchdog kills the bot, but its children keep running and
+    the dead parent lingers as a zombie. os.kill(pid, 0) succeeds for a zombie,
+    so treating that as alive made the sweep skip exactly the leftovers it was
+    written to clear, and the next start failed on the port they still held.
+    """
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
         return False
-    except PermissionError:
-        return True
-    return True
+    # state is the field after the (comm) group, which may contain spaces.
+    try:
+        state = stat[stat.rindex(")") + 2]
+    except (ValueError, IndexError):
+        return False
+    return state != "Z"
 
 
 class LiveViewService:
@@ -175,19 +185,58 @@ class LiveViewService:
         return found
 
     async def _pids_on_port(self, port: int) -> list[int]:
-        """PIDs listening on a local port, best effort, empty on any failure."""
+        """PIDs listening on a local port, read from /proc.
+
+        ``ss`` is not installed in this image, so shelling out to it silently
+        returned nothing and the port sweep never ran. The kernel exposes the
+        same data in /proc/net/tcp: a listening socket is state 0A, and its
+        inode can be matched against the socket links in each process's fds.
+        """
+        loop = asyncio.get_running_loop()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ss", "-ltnp", f"sport = :{port}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self._port_owners_sync, port), timeout=6
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=4)
         except Exception:  # noqa: BLE001
             return []
+
+    @staticmethod
+    def _port_owners_sync(port: int) -> list[int]:
+        inodes = set()
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                lines = Path(table).read_text().splitlines()[1:]
+            except OSError:
+                continue
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                try:
+                    local_port = int(parts[1].split(":")[1], 16)
+                except (IndexError, ValueError):
+                    continue
+                if local_port == port and parts[3] == "0A":  # 0A = LISTEN
+                    inodes.add(parts[9])
+
+        if not inodes:
+            return []
         pids = []
-        for match in re.finditer(r"pid=(\d+)", out.decode(errors="ignore")):
-            pids.append(int(match.group(1)))
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fds = list((entry / "fd").iterdir())
+            except OSError:
+                continue
+            for fd in fds:
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    pids.append(int(entry.name))
+                    break
         return pids
 
     async def _is_our_tool(self, pid: int) -> bool:
@@ -405,12 +454,21 @@ class LiveViewService:
         return env
 
     async def _start_x11vnc(self, pw_file: Path) -> bool:
+        # 5900 is often still held - by a socket left behind by an earlier run,
+        # by another VNC tool, or by a process this container cannot see. Trying
+        # one fixed port made the whole live screen fail whenever that happened,
+        # so take the first free port instead of insisting on 5900.
+        port = await self._pick_free_port(self.state.vnc_port)
+        if port is None:
+            log.warning("no free VNC port near %s", self.state.vnc_port)
+            return False
+        self.state.vnc_port = port
         proc = await asyncio.create_subprocess_exec(
             "x11vnc",
             "-display",
             self.state.display,
             "-rfbport",
-            str(self.state.vnc_port),
+            str(port),
             # localhost only: the public door is noVNC, which has its own auth.
             "-localhost",
             "-rfbauth",
@@ -432,6 +490,9 @@ class LiveViewService:
         return False
 
     async def _start_websockify(self) -> bool:
+        # The noVNC port is the public one (work-2 -> 12001), so it must stay
+        # fixed: moving it would hand the user a URL nothing serves. A stale
+        # websockify from our own dead run is already cleared by the sweep.
         proc = await asyncio.create_subprocess_exec(
             "websockify",
             "--web",
@@ -450,6 +511,22 @@ class LiveViewService:
                 self.state.websockify = proc
                 return True
         return False
+
+    @staticmethod
+    async def _pick_free_port(start: int, tries: int = 10) -> int | None:
+        """First port at or above ``start`` that can actually be bound."""
+        for port in range(start, start + tries):
+            try:
+                server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", port)
+            except OSError:
+                continue
+            server.close()
+            try:
+                await server.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return port
+        return None
 
     @staticmethod
     async def _port_open(host: str, port: int) -> bool:
