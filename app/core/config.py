@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     live_view_port: int = 12001
     # Headless server? /login runs the browser under xvfb and sends screenshots.
     browser_headful: bool = True
+    # Drive the real browser-use agent (github.com/browser-use/browser-use) for
+    # tasks that need judgement - multi-page flows, reading a result out of a
+    # page. It lives in its own virtualenv because its pins conflict with ours.
+    # Empty means "use ./.venv-browser".
+    browser_use_venv: str = ""
+    # Model for browser-use. Empty lets the driver pick per configured provider.
+    browser_use_model: str = ""
+    # Headless is required on a server; a headless browser cannot be watched.
+    browser_headless: bool = True
+    # Steps cap for one browser-use task. Every step is a model call, so this is
+    # also a spend cap.
+    browser_use_max_steps: int = 8
     # Post the agent's screen into the chat as a moving tile while it works.
     live_feed_enabled: bool = True
     # Seconds between feed updates. Under ~4s the GIFs overlap on a slow link.

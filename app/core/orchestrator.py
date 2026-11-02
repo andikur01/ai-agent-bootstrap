@@ -41,6 +41,7 @@ from app.memory.artifacts import (
 from app.services.audio_service import AudioService
 from app.services.browser_agent import BrowserAgent
 from app.services.browser_qa import BrowserQA
+from app.services import browser_use_service
 from app.services.deploy_service import DeployService
 from app.services.image_service import ImageService
 from app.services.link_service import LinkIngestService, answer_about_link
@@ -711,6 +712,40 @@ class Orchestrator:
         if progress:
             await progress(5, f"Membuka {url}")
 
+        # Specialist first: the real browser-use agent handles judgement calls
+        # (multi-page flows, reading a value out of a rendered page) far better
+        # than the built-in element-clicking loop. Fall back to that loop when
+        # browser-use is not installed, so the feature still works.
+        if browser_use_service.is_available(self.settings):
+            result = await browser_use_service.run_browser_use(
+                self.settings,
+                url=url,
+                task=task,
+                user_id=user_id,
+                max_steps=int(getattr(self.settings, "browser_use_max_steps", 8)),
+                profile_dir=self._browser_profile_dir(user_id),
+            )
+            if result.ok and result.answer.strip():
+                await self.memory.register_artifact(
+                    user_id,
+                    KIND_LINK,
+                    title=f"browse: {task[:60]}",
+                    location=url,
+                    meta={"task": task, "steps": result.steps[:10], "ok": True,
+                          "engine": "browser-use"},
+                )
+                body = result.answer.strip()
+                text_out = f"*Browser agent* (browser-use) selesai di `{url}`\n\n{body}"
+                shots = [s for s in result.screenshots if s][-2:]
+                return Outcome(
+                    text=text_out,
+                    url=url,
+                    milestone_screenshots=shots,
+                    tokens=result.tokens or estimate_tokens_for(Intent.THINK),
+                )
+            if result.error:
+                log.warning("browser-use failed, falling back: %s", result.error[:200])
+
         # Wire the mid-task question hook so a login wall asks the user for an
         # account instead of giving up. Bound to this user and this chat.
         if self.ask_user is not None:
@@ -750,6 +785,20 @@ class Orchestrator:
             milestone_screenshots=shots,
             tokens=estimate_tokens_for(Intent.THINK),
         )
+
+    def _browser_profile_dir(self, user_id: int) -> Path | None:
+        """The user's saved Chromium profile, so browser-use reuses their login.
+
+        Both engines point at the same directory on purpose: the user signs in
+        once, through either path, and the session is there for the next task.
+        """
+        profiles = getattr(self.browser, "profiles", None)
+        if profiles is None:
+            return None
+        try:
+            return profiles.profile_dir(user_id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _collect_download(self) -> tuple[list[str], str]:
         """Take the file the browser agent downloaded, if there is one.
