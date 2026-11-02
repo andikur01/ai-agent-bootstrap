@@ -299,3 +299,21 @@ suite loads `.env`, so a real `TELEGRAM_ALLOWED_USER_IDS`, `GROQ_API_KEY`, or
 VNC host in the shell makes unrelated tests fail with "user not authorised" or
 a non-empty viewer URL. Before blaming a change, re-run the failing tests with
 those variables unset; four of twenty baseline failures were exactly this.
+
+**A fixed port is a single point of failure on a shared host.** x11vnc failed
+to start with "Address already in use" on 5900 even though nothing appeared to
+own it, which took the whole live screen down. Take the first free port for
+internal helpers; keep only the port the user opens fixed, because moving that
+one hands them a URL nothing serves.
+
+**Do not trust `ss`, `lsof`, or `os.kill(pid, 0)` for process state here.**
+`ss` is not installed, so shelling out to it silently found no port owners and
+the stale-helper sweep never ran. `os.kill(pid, 0)` succeeds for a zombie, and
+the watchdog leaves the killed bot as a zombie, so the sweep skipped exactly
+the leftovers it exists to clear. Read `/proc/net/tcp` for listening sockets
+and `/proc/<pid>/stat` state for liveness.
+
+**A screenshot is not proof the screen shows anything.** Measure image variety
+before claiming the live view works: a blank Xvfb capture is one colour, a
+rendered page is hundreds. The feed also needs `scrot` in the image, or it
+falls back to QA stills and the user sees only a dot.
