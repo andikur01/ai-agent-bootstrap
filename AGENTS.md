@@ -271,3 +271,31 @@ login (`_looks_like_credentials`), so a one-time code is not deleted.
 but nothing in the reply said who handled it, so the user could not tell it
 worked. Name the expert on every non-chat reply. Likewise, do not write
 "terenkripsi" when the file is only mode 0600 - say what is actually true.
+
+**A budget only holds on the paths it can see.** The daily token limit looked
+enforced because the gateway refused overspending - but browser-use calls the
+provider directly, so every browsing run spent tokens the meter never recorded.
+That is the shape of most cost bugs: not a missing limit, a path around it.
+Any component that talks to a provider outside the gateway must check the
+remaining budget before it starts and record what it spends afterwards, failure
+included. Verify by running the real component and comparing the meter's delta
+to the reported usage, not by reading the code.
+
+**Check what a data source actually contains before building on its name.**
+"Get the key from public-apis" fails as written: that repo has no keys, only a
+directory of ~2,200 services and where each issues one. The feature that works
+is the step before the key - which services exist, which need a credential, and
+where to sign up - then hand off to the existing harvester. When a request names
+a source, read the source first and say plainly what it is and is not.
+
+**Match the data's language, not the user's.** The public-apis directory is in
+English and the user types Indonesian, so "cari api cuaca" matched nothing and
+the feature looked broken on first use. A small synonym map fixes it; the
+general lesson is that a search over a fixed corpus needs the query normalised
+into the corpus's own vocabulary before scoring.
+
+**Test isolation is not optional when tests read the real environment.** The
+suite loads `.env`, so a real `TELEGRAM_ALLOWED_USER_IDS`, `GROQ_API_KEY`, or
+VNC host in the shell makes unrelated tests fail with "user not authorised" or
+a non-empty viewer URL. Before blaming a change, re-run the failing tests with
+those variables unset; four of twenty baseline failures were exactly this.
