@@ -153,6 +153,7 @@ HELP_EXTRA = (
     "`/keys auto` <provider> - Ambil key otomatis\n"
     "`/keys add` <provider> <key> - Kirim manual\n"
     "`/stok` - Stok token nyata (dihitung, bukan karangan)\n"
+    "`/budget` - Lihat & ubah batas token harian\n"
     "`/disk` - Cek penyimpanan, `/disk bersih` untuk bersihkan\n"
     "`/tes` - Aku tes kodeku sendiri dulu sebelum bilang selesai\n"
     "Ketik: `ambil key di situsbaru.com` - aku cari di situs mana pun\n"
@@ -507,6 +508,15 @@ class TelegramBot:
             return
 
         await self.store.upsert_user(user.id, user.username or "", user.first_name or "")
+
+        # Warn once if there is no daily ceiling. The user learned about the
+        # million-token day from the bill, not from the bot, because this
+        # warning existed but was never called.
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is not None:
+            warning = guard.unlimited_warning()
+            if warning:
+                await message.reply_text(warning, parse_mode="Markdown")
 
         text = (message.text or message.caption or "").strip()
 
@@ -1066,9 +1076,96 @@ class TelegramBot:
         if budget is not None:
             lines.append("")
             lines.append(await budget.summary(user.id))
+
+        # Show the spending ceiling here, because this is the command the menu
+        # points at for cost. Reporting the total after the fact is an autopsy;
+        # the user needs to see the limit before it is hit.
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is not None:
+            lines.append("")
+            if guard.daily_budget > 0:
+                lines.append(
+                    f"💰 Batas harian: {guard.daily_budget:,} token\n"
+                    f"   Batas per tugas: {guard.task_limit():,} token\n"
+                    f"   Batas per panggilan: {guard.max_call:,} token"
+                )
+            else:
+                lines.append(
+                    "⚠️ Batas harian: *tanpa batas* (`DAILY_TOKEN_BUDGET=0`).\n"
+                    "   Token bisa kebablasan seperti kemarin. Aku tetap batasi "
+                    f"{guard.max_call:,} token per panggilan.\n"
+                    "   Isi `DAILY_TOKEN_BUDGET=150000` di `.env` biar aman."
+                )
         lines.append("")
         lines.append("Ubah: `/hidupkan` atau `/hidupkan off`")
         await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show and change the daily token ceiling from the chat.
+
+        The user hit a million tokens because the ceiling defaulted to unlimited
+        and could only be changed by editing `.env` on the server. Both of those
+        are fixed here: the default is bounded, and `/budget <angka>` sets it
+        live, without a restart.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is None:
+            await update.message.reply_text("Pengaman biaya belum aktif di server ini.")
+            return
+
+        args = list(context.args or [])
+        if args:
+            raw = args[0].lower().replace(".", "").replace(",", "").replace("_", "")
+            if raw in ("off", "unlimited", "tanpa", "0"):
+                guard.daily_budget = 0
+                from app.llm.credentials import set_env_var
+
+                set_env_var(self.settings.env_file, "DAILY_TOKEN_BUDGET", "0")
+                await update.message.reply_text(
+                    "⚠️ Batas harian dimatikan (`DAILY_TOKEN_BUDGET=0`).\n"
+                    "Token sekarang bisa kebablasan. Nyalakan lagi: `/budget 150000`",
+                    parse_mode="Markdown",
+                )
+                return
+            if not raw.isdigit():
+                await update.message.reply_text(
+                    "Formatnya angka, contoh: `/budget 150000`", parse_mode="Markdown"
+                )
+                return
+            value = int(raw)
+            if value < 5000:
+                await update.message.reply_text(
+                    "Terlalu kecil - aku akan menyerah di tengah tugas. Minimal 5000.",
+                )
+                return
+            guard.daily_budget = value
+            from app.llm.credentials import set_env_var
+
+            set_env_var(self.settings.env_file, "DAILY_TOKEN_BUDGET", str(value))
+            await update.message.reply_text(
+                f"✅ Batas harian jadi *{value:,} token*.\n"
+                f"Batas per tugas: {guard.task_limit():,} token\n"
+                "Langsung berlaku, tanpa restart.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if guard.daily_budget > 0:
+            head = f"💰 Batas harian: *{guard.daily_budget:,} token*"
+            note = ""
+        else:
+            head = "⚠️ Batas harian: *tanpa batas*"
+            note = "\nIni yang bikin token kamu ~1 juta kemarin. Sebaiknya diisi."
+        await update.message.reply_text(
+            f"{head}\n"
+            f"Batas per tugas: {guard.task_limit():,} token\n"
+            f"Batas per panggilan: {guard.max_call:,} token{note}\n\n"
+            "Ubah: `/budget 150000`\n"
+            "Matikan: `/budget off`",
+            parse_mode="Markdown",
+        )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         providers = self.settings.available_providers()

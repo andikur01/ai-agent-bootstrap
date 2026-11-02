@@ -221,6 +221,26 @@ def append_key(env_path: Path, provider: Provider, key: str, slot: int) -> str:
     return var
 
 
+def set_env_var(env_path: Path, var: str, value: str) -> None:
+    """Replace (or add) a variable in .env, and apply it to this process.
+
+    Used for non-secret tuning like the daily token ceiling, so the user can fix
+    a runaway budget from the chat instead of editing files on the server. The
+    file is gitignored; the value is not a credential.
+    """
+    line = f"{var}={value}"
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    pattern = re.compile(rf"^{re.escape(var)}\s*=.*$", re.MULTILINE)
+    if pattern.search(content):
+        content = pattern.sub(line, content)
+    else:
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += line + "\n"
+    env_path.write_text(content, encoding="utf-8")
+    os.environ[var] = value
+
+
 def mask(key: str) -> str:
     if len(key) <= 4:
         return "****"

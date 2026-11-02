@@ -104,6 +104,7 @@ class Application:
             BotCommand("login", "Login sekali ke situs provider"),
             BotCommand("live", "Lihat & kendalikan layar browser AI"),
             BotCommand("siaran", "Siaran layar di chat: on/off"),
+            BotCommand("budget", "Lihat/ubah batas token harian"),
             BotCommand("buat_gambar", "Generate gambar"),
             BotCommand("edit_gambar", "Edit gambar terakhir"),
             BotCommand("buat_video", "Buat video"),
@@ -363,6 +364,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))
     app.add_handler(CommandHandler("siaran", bot.cmd_siaran))
+    app.add_handler(CommandHandler("budget", bot.cmd_budget))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))

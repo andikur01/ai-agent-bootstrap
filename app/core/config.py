@@ -70,9 +70,11 @@ class Settings(BaseSettings):
     )
     small_model: str = "groq/openai/gpt-oss-20b"
     big_model: str = "groq/openai/gpt-oss-120b"
-    # 0 = tidak dibatasi. Cap membuat AI menyerah di tengah tugas dan
-    # mengirim hasil jelek, jadi default-nya bebas.
-    daily_token_budget: int = 0
+    # Daily token ceiling. It used to default to 0 (unlimited), which is
+    # exactly how one day reached a million tokens: nothing ever said "enough".
+    # 150k is roughly a few hundred normal chats or a handful of web builds.
+    # Set 0 only when you deliberately want no ceiling.
+    daily_token_budget: int = 150000
     semantic_cache_enabled: bool = True
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
