@@ -274,7 +274,7 @@ class WebBuilder:
                 log.warning("rejected path escaping project root: %s", relative)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(content), encoding="utf-8")
+            target.write_text(_decode_double_escaped(str(content)), encoding="utf-8")
             written.append(target)
 
         project = WebProject(
@@ -390,6 +390,31 @@ def _wire_head(html: str, direction) -> str:
     else:
         html = stylesheet + html
     return html
+
+
+def _decode_double_escaped(content: str) -> str:
+    """Undo a second round of escaping that some models emit inside JSON strings.
+
+    The model is asked for a JSON object whose values are file contents. Some
+    models return valid JSON in which the value itself is an escaped string:
+    a newline arrives as the two characters ``\\n`` instead of a real newline.
+    The JSON parses fine, so nothing complains, and the written file is one
+    long line of ``\\n`` - which is exactly the "Invalid or unexpected token"
+    JavaScript error the QA browser reported. Decode only when the whole file
+    is clearly escaped, so real backslashes in code are left alone.
+    """
+    if "\\n" not in content or "\n" in content:
+        return content
+    try:
+        # latin-1 with backslashreplace keeps non-ASCII characters (emoji, accents)
+        # intact: they become \uXXXX escapes which unicode_escape then restores.
+        # Encoding as utf-8 instead would mojibake every emoji in the page.
+        decoded = content.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        return content
+    if decoded.count("\n") == content.count("\\n"):
+        return decoded
+    return content
 
 
 def _parse_json(text: str) -> dict:

@@ -29,6 +29,16 @@ log = get_logger(__name__)
 
 DEFAULT_HOST_PORT = 12000
 
+# A neutral document icon, served for /favicon.ico so browsers stop logging a
+# 404 for a file no generated site ever links to.
+_FAVICON_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    b'<rect width="64" height="64" rx="12" fill="#121212"/>'
+    b'<path d="M20 14h18l10 10v26a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4z" '
+    b'fill="none" stroke="#6ee7b7" stroke-width="4" stroke-linejoin="round"/>'
+    b"</svg>"
+)
+
 
 class SiteHost:
     """Serve a directory of generated sites over HTTP on the public port."""
@@ -56,7 +66,9 @@ class SiteHost:
             return True
         app = web.Application()
         app.router.add_get("/", self._index)
+        app.router.add_get("/favicon.ico", self._favicon)
         app.router.add_get("/s/{name}", self._serve_index)
+        app.router.add_get("/s/{name}/favicon.ico", self._favicon)
         app.router.add_get("/s/{name}/{path:.*}", self._serve_file)
         try:
             runner = web.AppRunner(app, access_log=None)
@@ -131,6 +143,15 @@ class SiteHost:
         body += "max-width:40rem;margin:3rem auto;padding:0 1rem'>"
         body += f"<h1>Website kamu</h1><ul>{items}</ul></body></html>"
         return web.Response(text=body, content_type="text/html")
+
+    async def _favicon(self, request: web.Request) -> web.Response:
+        """Answer /favicon.ico instead of 404.
+
+        Browsers request it unprompted, and a 404 lands in the console as
+        "Failed to load resource", which made every deployed site fail QA over
+        an asset the site never referenced.
+        """
+        return web.Response(body=_FAVICON_BYTES, content_type="image/svg+xml")
 
     async def _serve_index(self, request: web.Request) -> web.Response:
         return await self._serve_file(request)

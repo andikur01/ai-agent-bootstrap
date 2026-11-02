@@ -126,6 +126,31 @@ async def test_second_host_cannot_bind_the_same_port(tmp_path):
         await host.stop()
 
 
+def test_favicon_is_served_not_404(tmp_path):
+    """Browsers ask for /favicon.ico unprompted; a 404 fails QA on every site."""
+    import asyncio
+
+    from app.services.hosting_service import SiteHost
+
+    source = tmp_path / "build"
+    _write_site(source)
+
+    async def run():
+        host = SiteHost(tmp_path / "sites", port=PORT, public_base_url="http://127.0.0.1")
+        assert await host.start()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                root = await client.get(f"http://127.0.0.1:{PORT}/favicon.ico")
+                scoped = await client.get(f"http://127.0.0.1:{PORT}/s/demo/favicon.ico")
+            assert root.status_code == 200
+            assert scoped.status_code == 200
+            assert "svg" in root.headers.get("content-type", "")
+        finally:
+            await host.stop()
+
+    asyncio.run(run())
+
+
 def test_login_page_counts_as_content():
     """A short page full of controls is not an empty page.
 
