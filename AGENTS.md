@@ -238,3 +238,36 @@ feed falls back to posting a new tile instead of raising.
 **A preference written before the first message used to vanish.** `set_pref`
 ran an `UPDATE ... WHERE user_id = ?` that matched zero rows when the user had
 never been stored, so `/siaran off` silently did nothing. Insert the row first.
+
+**A cost guard whose default is "unlimited" is not a cost guard.** The daily
+budget defaulted to `DAILY_TOKEN_BUDGET=0`, the ceiling lived only in `.env` on
+the server, and `CostGuard.unlimited_warning` was never called - so the first
+signal the user got was a ~1 million token day. Default to a real number
+(150000), surface the ceiling in `/mode` and `/budget`, and let `/budget <n>`
+change it from the chat. A limit the user cannot see or move from their phone
+is not a limit, it is a surprise.
+
+**Writing a preference is not the same as applying it.** `credentials.append_key`
+appends, which is right for numbered API key slots but wrong for a tuning value:
+two `/budget` calls would have left two `DAILY_TOKEN_BUDGET` lines and the last
+one wins only by luck. `set_env_var` replaces by regex. Reach for append for
+keys, replace for settings.
+
+**A browser that clicks invisibly looks broken to the person watching.** The
+agent's clicks left no trace on the shared screen, so pages changed by
+themselves. A cosmetic fixed-position pointer, slid to the target before each
+click and type, fixes it without touching the element list the model picks
+from. Keep it out of `_INTERACTIVE` and swallow its errors - a cursor is never
+worth failing a task over.
+
+**A login wall is a question, not a dead end.** The agent used to stop when it
+had no saved account. It now asks for one mid-task through the same
+`HandoffService` used for verification codes, parses the answer with or without
+the host, stores it, and signs in without restarting. The bot deletes the
+credential message after consuming it - but only when it actually looks like a
+login (`_looks_like_credentials`), so a one-time code is not deleted.
+
+**An invisible feature is not a feature.** Task routing to specialists existed,
+but nothing in the reply said who handled it, so the user could not tell it
+worked. Name the expert on every non-chat reply. Likewise, do not write
+"terenkripsi" when the file is only mode 0600 - say what is actually true.
