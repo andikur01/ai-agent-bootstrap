@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     ffprobe_bin: str = "ffprobe"
 
     # ---------- Deploy ----------
+    # Server ini punya port publik. Dipakai sebagai hosting cadangan ketika
+    # token Cloudflare/GitHub tidak boleh deploy - supaya user selalu dapat
+    # LINK, bukan cuma file zip. Isi dengan URL publik server ini.
+    public_base_url: str = ""
+    site_host_port: int = 12000
     github_token: str = ""
     github_owner: str = ""
     cloudflare_api_token: str = ""

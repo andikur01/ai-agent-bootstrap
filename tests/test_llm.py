@@ -173,6 +173,69 @@ async def test_gateway_records_usage_on_success(settings, monkeypatch, store):
 
 
 @pytest.mark.asyncio
+async def test_oversized_prompt_is_shrunk_and_retried(settings, monkeypatch):
+    """A "request too large" rejection must shrink the prompt, not rotate keys.
+
+    The free Groq tier allows 8000 tokens/minute. A full web-build prompt of
+    ~11k tokens was rejected on every attempt, and the old code responded by
+    benching and rotating a healthy key - which could never help, because the
+    limit is on the prompt size. The gateway must instead send less and retry.
+    """
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_" + "d" * 30)
+    from app.core import config as config_module
+
+    config_module.get_settings.cache_clear()
+    fresh = config_module.get_settings()
+    gw = LLMGateway(fresh)
+
+    seen_prompt_sizes: list[int] = []
+
+    async def fake_acompletion(**kwargs):
+        size = count_message_tokens(kwargs["messages"])
+        seen_prompt_sizes.append(size)
+        if size > 2000:
+            raise RuntimeError(
+                "Request too large for model in organization on tokens per minute "
+                "(TPM): Limit 8000, Requested 11512, please reduce your message size"
+            )
+
+        class _Msg:
+            content = "jawaban setelah dikecilkan"
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            usage = None
+            choices = [_Choice()]
+
+        return _Resp()
+
+    gw._litellm = fake_acompletion  # noqa: SLF001
+    huge = [{"role": "system", "content": "S" * 100}]
+    for _ in range(40):
+        huge.append({"role": "user", "content": "kata " * 400})
+    result = await gw.complete(huge, tier="small")
+    assert result.text == "jawaban setelah dikecilkan"
+    # First call was too big, a later call was small enough to succeed.
+    assert seen_prompt_sizes[0] > 2000
+    assert min(seen_prompt_sizes) <= 2000
+    config_module.get_settings.cache_clear()
+
+
+def test_prompt_too_large_is_distinguished_from_throttling():
+    from app.llm.gateway import _looks_like_prompt_too_large
+
+    assert _looks_like_prompt_too_large(RuntimeError("Request too large for model"))
+    assert _looks_like_prompt_too_large(
+        RuntimeError("Rate limit reached on tokens per minute (TPM): Limit 8000")
+    )
+    assert _looks_like_prompt_too_large(RuntimeError("context_length_exceeded"))
+    assert not _looks_like_prompt_too_large(RuntimeError("429 Too Many Requests"))
+    assert not _looks_like_prompt_too_large(None)
+
+
+@pytest.mark.asyncio
 async def test_gateway_parses_json_with_code_fence(settings, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_" + "c" * 30)
     from app.core import config as config_module

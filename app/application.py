@@ -213,6 +213,26 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     except Exception as exc:  # noqa: BLE001 - a display must not stop the bot
         log.warning("live view failed to start: %s", exc)
 
+    # Start the site host once at boot. Binding per deploy would race when two
+    # sites are built at the same time, and a port that opens only after a
+    # request is a port that is closed when the first link is clicked.
+    if settings.public_base_url:
+        try:
+            from app.services.hosting_service import SiteHost
+
+            site_host = SiteHost(
+                settings.outputs_path / "sites",
+                port=settings.site_host_port,
+                public_base_url=settings.public_base_url,
+            )
+            if await site_host.start():
+                orchestrator.deployer.site_host = site_host
+                log.info("site host ready on port %s", settings.site_host_port)
+            else:
+                log.warning("site host could not bind port %s", settings.site_host_port)
+        except Exception as exc:  # noqa: BLE001 - hosting must not stop the bot
+            log.warning("site host failed to start: %s", exc)
+
     bot = TelegramBot(
         settings=settings,
         store=store,

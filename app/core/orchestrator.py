@@ -51,12 +51,18 @@ from app.services.web_repair import WebRepairService
 
 log = get_logger(__name__)
 
-PERSONA = """Kamu asisten pribadi lewat Telegram. Gaya: santai, jelas, to the point,
-Bahasa Indonesia. Kamu punya memori jangka panjang tentang user dan bisa membuat
-gambar, video, suara, website, dan workflow n8n.
+PERSONA = """Kamu asisten pribadi lewat Telegram, ngobrol pakai Bahasa Indonesia santai
+(lo/gue boleh, tapi ikuti gaya user). Kamu punya memori jangka panjang tentang
+user dan bisa bikin gambar, video, suara, website, dan workflow n8n.
 
 Aturan:
-- Jawab langsung. Jangan buka dengan "Tentu!" atau basa-basi.
+- Ngobrol natural kayak teman yang pinter. Jawab langsung, jangan buka dengan
+  "Tentu!" atau basa-basi kaku.
+- Kalau user nulis singkat/typo/singkatan ("brp", "gmn", "udh", "bgt"), pahami
+  maksudnya dari konteks chat sebelumnya dan jawab maksudnya. JANGAN balas
+  "apa maksud Anda" - itu bikin kesal.
+- Kalau pesan user ambigu DAN tidak ada konteks, baru tanya balik - satu
+  pertanyaan singkat, bukan ceramah.
 - Kalau user merujuk pekerjaan sebelumnya ("yang tadi", "lanjutkan"), konteks
   referensinya sudah diberikan di bawah. Pakai itu, jangan tanya ulang.
 - Kalau kamu butuh sesuatu dari user (file, token, izin), bilang persis apa yang
@@ -730,7 +736,17 @@ class Orchestrator:
             text += f"\n\nSudah diimport: {imported['url']} (aktif: {imported['active']})"
             location = imported["url"]
         except MissingSecretError:
-            text += "\n\n(n8n API key belum diisi, jadi aku simpan JSON-nya saja.)"
+            # n8n itself is running (it is started for you), it just has no API
+            # key yet, and only the owner can create one. Say exactly where to
+            # click instead of leaving the user with a JSON file and a shrug.
+            base = self.settings.n8n_base_url.rstrip("/")
+            text += (
+                "\n\nn8n sudah jalan, tapi aku belum bisa import otomatis "
+                "karena belum ada API key.\n"
+                f"Bikin sekali saja di sini: {base} → Settings → n8n API → Create API key, "
+                "lalu isi `N8N_API_KEY` di .env.\n"
+                "Sementara ini JSON workflow-nya aku lampirkan, tinggal di-import manual."
+            )
             location = str(path)
         except Exception as exc:  # noqa: BLE001
             text += f"\n\nImport otomatis gagal: {str(exc)[:150]}"

@@ -302,6 +302,25 @@ class LLMGateway:
                         attempt,
                         exc,
                     )
+                    # "Request too large" is a token limit on the prompt, so
+                    # rotating keys cannot help - the request itself must shrink.
+                    # This must run before, and independently of, the key pool: a
+                    # single-key setup hits the same wall.
+                    #
+                    # The provider counts input *and* the max_tokens reservation
+                    # against its per-minute budget, so both have to come down.
+                    # One aggressive step is deliberate: the retry budget is
+                    # small, and halving 24000 to 12000 would still exceed an
+                    # 8000/min free tier and burn the remaining attempts.
+                    if _looks_like_prompt_too_large(exc) and budget_tokens > 2000:
+                        model_cap = min(model_cap, 2000)
+                        budget_tokens = min(budget_tokens // 2, 5000 - model_cap)
+                        budget_tokens = max(1500, budget_tokens)
+                        prepared = trim_messages(messages, budget_tokens)
+                        prompt_tokens = count_message_tokens(prepared)
+                        attempts.append(f"{provider}:shrink->{budget_tokens}")
+                        await asyncio.sleep(min(3.0, 1.0 * (attempt + 1)))
+                        continue
                     # A throttled key is not a broken provider. Bench it, swap
                     # in the next one, and retry here before falling through -
                     # otherwise one exhausted free tier takes the whole
@@ -419,6 +438,33 @@ _AUTH_FAILURE_MARKERS = (
     "permission denied",
     "invalid authentication",
 )
+
+
+def _looks_like_prompt_too_large(error: Exception | None) -> bool:
+    """True when the provider rejected the request because it is too big.
+
+    Distinct from throttling: rotating to another key does not help, because the
+    limit is tokens-per-minute on the *prompt*, not requests on the key. The only
+    fix is to send less. Groq's free tier, for example, allows 8000 tokens per
+    minute, and a web-build prompt of 11k was rejected every single time while
+    the bot dutifully benched and rotated a perfectly healthy key.
+    """
+    if error is None:
+        return False
+    blob = f"{type(error).__name__} {error}".lower()
+    return any(
+        marker in blob
+        for marker in (
+            "request too large",
+            "tokens per minute",
+            "tpm",
+            "reduce your message size",
+            "context length",
+            "context_length_exceeded",
+            "maximum context",
+            "too many tokens",
+        )
+    )
 
 
 def _looks_like_auth_failure(error: Exception | None) -> bool:

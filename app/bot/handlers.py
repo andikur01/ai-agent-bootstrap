@@ -52,6 +52,16 @@ _WATCHABLE_INTENTS = {
     Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR,
     Intent.VIDEO_CREATE, Intent.BROWSE,
 }
+# Intents where a progress bar is honest: the user is waiting on real work.
+# Chat, help and memory lookups answer in a second, so a bar there is theatre.
+_PROGRESS_INTENTS = {
+    Intent.IMAGE_CREATE, Intent.IMAGE_EDIT,
+    Intent.VIDEO_CREATE, Intent.VIDEO_EDIT,
+    Intent.AUDIO_CREATE, Intent.AUDIO_EDIT,
+    Intent.TTS, Intent.STT,
+    Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR,
+    Intent.N8N, Intent.LEARN, Intent.LINK_INGEST, Intent.THINK, Intent.BROWSE,
+}
 _ASK_TEXTS = {
     "web": "apakah webnya sudah jadi?",
     "gambar": "apakah gambarnya sudah jadi?",
@@ -276,6 +286,19 @@ def menu_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(label, callback_data=f"{MENU_PREFIX}{ASK_PREFIX}{key}")])
     rows.append([InlineKeyboardButton("⬅️ Kembali ke menu", callback_data=f"{MENU_PREFIX}home")])
     return body, InlineKeyboardMarkup(rows)
+
+
+def _is_token_request(text: str) -> bool:
+    """Did the user actually ask what this cost?
+
+    Printing the figure on every reply made the conversation unreadable, so it
+    is shown only when asked for. The match is on the user's own words.
+    """
+    lowered = (text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in ("berapa token", "token terpakai", "pakai token", "biaya token", "harga token")
+    )
 
 
 def _args_text(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -600,6 +623,9 @@ class TelegramBot:
         if message is None or user is None:
             return
         user_id = user.id
+        # The user's own words for this turn, used below to decide whether they
+        # actually asked about token usage.
+        text = str(route.args.get("text") or "")
 
         # heavy quota
         if route.intent in {Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR, Intent.VIDEO_CREATE}:
@@ -631,16 +657,22 @@ class TelegramBot:
             except Exception as exc:  # noqa: BLE001 - never block the task
                 log.debug("live view not started for task: %s", exc)
 
+        # A progress bar belongs on work with real waiting in it. Showing one for
+        # "hallo brp" put a progress bar and a "Mulai..." line above every
+        # conversational reply, which is what made the chat feel like a machine.
+        # Light intents just show the typing indicator.
+        show_progress = route.intent in _PROGRESS_INTENTS
         reporter = ProgressReporter(
             lambda text: message.reply_text(text, parse_mode="Markdown"),
             title=f"{route.intent.value}",
             send_photo=lambda path, caption: message.reply_photo(
                 Path(path).open("rb"), caption=redact(caption)[:1024]
             ),
-        )
+        ) if show_progress else None
 
         async def progress(percent: int, note: str, *, screenshot: str = "") -> None:
-            await reporter.update(percent, note, screenshot=screenshot)
+            if reporter is not None:
+                await reporter.update(percent, note, screenshot=screenshot)
 
         try:
             async with TypingIndicator(message.chat):
@@ -663,10 +695,13 @@ class TelegramBot:
             body = outcome.text
             if outcome.cached:
                 body += "\n\n_(dari cache, hemat token)_"
-            # Report what the task actually cost. A guessed estimate before the
-            # run is a promise; the real number afterwards is a fact, and the
-            # user asked for the fact.
-            if outcome.tokens:
+            # The token figure used to be printed under every reply, and the
+            # user found it noisy: "bro chat bisa kok di tampilan habis berapa
+            # token sih". It is also an estimate, not a measurement, so putting
+            # it on every message reads as precision that is not there. It now
+            # lives behind /stok and /status, where someone asking for it will
+            # look, and stays off the conversation.
+            if outcome.tokens and _is_token_request(text):
                 body += f"\n\n_Token terpakai: {outcome.tokens:,}_"
             await send_text(message, body)
 
