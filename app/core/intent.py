@@ -538,6 +538,45 @@ async def route_message(
     has_voice: bool = False,
     has_document: bool = False,
 ) -> Route:
+    route = await _route_message_inner(
+        text,
+        gateway,
+        user_id=user_id,
+        has_photo=has_photo,
+        has_voice=has_voice,
+        has_document=has_document,
+    )
+    return _apply_delegation(route, text)
+
+
+def _apply_delegation(route: Route, text: str) -> Route:
+    """Record that the user asked for the specialist, on whichever route won.
+
+    "kasih ke ahlinya, buat video" must reach the video expert no matter which
+    branch routed it - rules, the classifier, or the fallback. Doing it once
+    here, after routing, keeps every path covered and costs no tokens: the
+    phrase is matched with plain string work.
+    """
+    from app.core.specialists import pick as _pick, wants_delegation
+
+    if not wants_delegation(text):
+        return route
+    options = _pick(text)
+    route.args["delegate"] = True
+    route.args["delegate_specialist"] = options[0].key if options else ""
+    route.args["delegate_all"] = [s.key for s in options]
+    return route
+
+
+async def _route_message_inner(
+    text: str,
+    gateway=None,
+    *,
+    user_id: int = 0,
+    has_photo: bool = False,
+    has_voice: bool = False,
+    has_document: bool = False,
+) -> Route:
     # A question about existing work is answered from the registry, never
     # turned into a build. "apakah webnya sudah jadi" must not start a new site.
     if is_question_about_work(text):

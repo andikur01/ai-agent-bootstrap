@@ -24,6 +24,7 @@ from typing import Awaitable, Callable
 from app.core.errors import AgentError, MissingSecretError, TaskCancelledError
 from app.core.intent import Intent, Route, route_message
 from app.core.logging_setup import get_logger
+from app.core.specialists import Specialist, for_intent as specialist_for, pick as pick_specialists
 from app.core.thinking import ThinkingEngine
 from app.llm.tokens import count_message_tokens, estimate
 from app.memory.artifacts import (
@@ -51,24 +52,8 @@ from app.services.web_repair import WebRepairService
 
 log = get_logger(__name__)
 
-PERSONA = """Kamu asisten pribadi lewat Telegram, ngobrol pakai Bahasa Indonesia santai
-(lo/gue boleh, tapi ikuti gaya user). Kamu punya memori jangka panjang tentang
-user dan bisa bikin gambar, video, suara, website, dan workflow n8n.
-
-Aturan:
-- Ngobrol natural kayak teman yang pinter. Jawab langsung, jangan buka dengan
-  "Tentu!" atau basa-basi kaku.
-- Kalau user nulis singkat/typo/singkatan ("brp", "gmn", "udh", "bgt"), pahami
-  maksudnya dari konteks chat sebelumnya dan jawab maksudnya. JANGAN balas
-  "apa maksud Anda" - itu bikin kesal.
-- Kalau pesan user ambigu DAN tidak ada konteks, baru tanya balik - satu
-  pertanyaan singkat, bukan ceramah.
-- Kalau user merujuk pekerjaan sebelumnya ("yang tadi", "lanjutkan"), konteks
-  referensinya sudah diberikan di bawah. Pakai itu, jangan tanya ulang.
-- Kalau kamu butuh sesuatu dari user (file, token, izin), bilang persis apa yang
-  dibutuhkan dalam satu kalimat.
-- Jangan pernah mengaku sudah melakukan sesuatu yang belum kamu lakukan.
-- Ringkas: maksimal ~250 kata kecuali diminta detail."""
+# Personas now live in app.core.specialists, one per kind of work, so a website
+# is never written with a chat assistant's habits.
 
 CONFIRM_TEMPLATES = {
     Intent.IMAGE_CREATE: ("🎨 Bikin gambar baru", "image"),
@@ -136,6 +121,7 @@ class Outcome:
     tokens: int = 0
     cached: bool = False
     milestone_screenshots: list[str] = field(default_factory=list)
+    specialist: str = ""
 
 
 class Orchestrator:
@@ -239,6 +225,12 @@ class Orchestrator:
         handler = getattr(self, f"_do_{route.intent.value}", None)
         if handler is None:
             handler = self._do_chat
+
+        # The expert for this kind of work. Handlers read it for persona, tier
+        # and budget, so a website is never written with a chat assistant's
+        # habits. The user asked for exactly this: hand the task to the expert.
+        expert = self.specialist_for_route(route)
+        route.args.setdefault("specialist", expert.key)
         try:
             outcome = await handler(
                 user_id,
@@ -258,7 +250,29 @@ class Orchestrator:
             await self.store.log_error(route.intent.value, f"{type(exc).__name__}: {exc}", user_id)
             log.exception("handler failed intent=%s", route.intent.value)
             raise AgentError("Ada error tak terduga saat menjalankan tugas ini.") from exc
+        if not outcome.specialist:
+            outcome.specialist = expert.key
         return outcome
+
+    def specialist_for_route(self, route: Route) -> Specialist:
+        """The expert for this route.
+
+        A delegation request ("kasih ke ahlinya, buat video") names its own
+        domain, so it wins over the default mapping for the intent.
+        """
+        text = str(route.args.get("text") or "")
+        chosen = route.args.get("delegate_specialist")
+        if chosen:
+            from app.core.specialists import by_key
+
+            expert = by_key(str(chosen))
+            if expert is not None:
+                return expert
+        if route.args.get("delegate"):
+            options = pick_specialists(text)
+            if options:
+                return options[0]
+        return specialist_for(route.intent)
 
     # ------------------------------------------------------------- continue
     async def _do_continue(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
@@ -315,11 +329,12 @@ class Orchestrator:
 
         if kind in (KIND_RESEARCH, KIND_LINK):
             question = f"Lanjutkan pembahasan: {title}"
+            expert = self.specialist_for_route(route)
             bundle = await self.memory.build_context(
-                user_id, question, persona=PERSONA, recent_turns=4
+                user_id, question, persona=expert.persona, recent_turns=4
             )
             result = await self.gateway.complete(
-                bundle.messages, tier="small", user_id=user_id, max_tokens=700
+                bundle.messages, tier=expert.tier, user_id=user_id, max_tokens=700
             )
             return Outcome(text=f"{header}\n\n{result.text.strip()}", tokens=result.total_tokens)
 
@@ -353,21 +368,45 @@ class Orchestrator:
                 return Outcome(text=hit.response, cached=True)
 
         reference = await self.memory.resolve_reference(user_id, text)
+        expert = self.specialist_for_route(route)
+        persona = await self._persona_for(user_id, expert)
         bundle = await self.memory.build_context(
-            user_id, text, persona=PERSONA, reference=reference
+            user_id, text, persona=persona, reference=reference
         )
 
         if progress:
             await progress(30, "Menyusun jawaban")
         result = await self.gateway.complete(
-            bundle.messages, tier="small", user_id=user_id, temperature=0.5, max_tokens=900
+            bundle.messages,
+            tier=expert.tier,
+            user_id=user_id,
+            temperature=0.5,
+            max_tokens=expert.max_tokens,
         )
         answer = result.text.strip()
 
         if self.settings.semantic_cache_enabled and len(answer) > 40:
             await self.cache.put(user_id, text, answer, namespace="chat")
 
-        return Outcome(text=answer, tokens=result.total_tokens)
+        return Outcome(text=answer, tokens=result.total_tokens, specialist=expert.key)
+
+    async def _persona_for(self, user_id: int, expert) -> str:
+        """The expert's own instructions, plus the user's freedom setting.
+
+        "Hidupkan bot" is the user's phrase for turning the assistant loose: it
+        stops hedging and starts deciding. The switch is stored per user, so it
+        survives restarts, and the expert persona is always kept - freedom is
+        about how much it acts on its own, never about dropping its standards.
+        """
+        try:
+            prefs = await self.store.get_prefs(user_id)
+        except Exception:  # noqa: BLE001 - prefs are never worth failing a reply
+            prefs = {}
+        if prefs.get("free_mode"):
+            from app.core.specialists import FREE_MODE_RULES
+
+            return f"{expert.persona}\n\n{FREE_MODE_RULES}"
+        return expert.persona
 
     async def _status_answer(self, user_id: int, text: str) -> str | None:
         """Answer a "is it done yet?" question from real artifact records.
@@ -545,12 +584,13 @@ class Orchestrator:
         transcript = await self.audio.speech_to_text(voice_path)
         question = str(route.args.get("question") or route.args.get("text") or "").strip()
         if question:
+            expert = self.specialist_for_route(route)
             result = await self.gateway.complete(
                 [
-                    {"role": "system", "content": PERSONA},
+                    {"role": "system", "content": expert.persona},
                     {"role": "user", "content": f"Transkrip suara user:\n{transcript}\n\nPertanyaan/instruksi: {question}"},
                 ],
-                tier="small",
+                tier=expert.tier,
                 user_id=user_id,
                 temperature=0.4,
             )
