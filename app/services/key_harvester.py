@@ -127,7 +127,18 @@ class KeyHarvester:
         'input[id*="user" i]',
     )
     PASSWORD_SELECTORS = ('input[type="password"]', 'input[name="password"]')
-    SUBMIT_NAMES = ("Next", "Berikutnya", "Lanjut", "Continue", "Sign in", "Masuk", "Login", "Submit")
+    # A one-time code sent to the user's email or phone. These are the shapes
+    # providers actually use, checked before the login wall is declared final.
+    CODE_SELECTORS = (
+        'input[autocomplete="one-time-code"]',
+        'input[name*="otp" i]',
+        'input[name*="code" i]',
+        'input[id*="otp" i]',
+        'input[id*="code" i]',
+        'input[inputmode="numeric"]',
+        'input[type="tel"]',
+    )
+    SUBMIT_NAMES = ("Next", "Berikutnya", "Lanjut", "Continue", "Sign in", "Masuk", "Login", "Submit", "Verify", "Verifikasi", "Confirm")
 
     async def _first_visible(self, page, selectors):
         """Return the first visible locator among *selectors*, or None."""
@@ -219,14 +230,93 @@ class KeyHarvester:
         # Password only, no identifier field visible: nothing useful to do.
         return False
 
+    async def _needs_verification(self, page) -> bool:
+        """True when the page is asking for a one-time code, not a sign-in.
+
+        An OTP screen is recognised by having a code field and no create-key
+        button. Checking the field rather than the page text matters: the page
+        usually says "verify", not "sign in", so the sign-in test misses it and
+        the task would stop one step short of finishing.
+        """
+        try:
+            body = (await page.inner_text("body"))[:4000].lower()
+        except Exception:  # noqa: BLE001
+            return False
+        for pattern in CREATE_PATTERNS:
+            if re.search(pattern, body):
+                return False
+        if not any(marker in body for marker in ("verify", "verifikasi", "kode", "code", "otp")):
+            return False
+        return await self._first_visible(page, self.CODE_SELECTORS) is not None
+
+    async def _handle_verification(
+        self, page, provider: Provider, *, ask, progress=None, result=None
+    ) -> bool:
+        """Ask the user for the one-time code and submit it.
+
+        Only reached when a saved account signed in and the site still shows a
+        wall. Returns True when the code was accepted and the page moved on, so
+        the caller can continue to key creation without restarting the login.
+        """
+        code_field = await self._first_visible(page, self.CODE_SELECTORS)
+        if code_field is None:
+            # Not a code prompt: a captcha or a security key. Nothing to type.
+            if result is not None:
+                result.message = (
+                    f"{provider.label} minta langkah yang cuma bisa kamu lakukan "
+                    "(captcha / kunci keamanan).\n\n"
+                    "Selesaikan di HP, lalu bilang `ambil key " + provider.name + "` lagi."
+                )
+            return False
+
+        if progress:
+            await progress(35, "Situs minta kode verifikasi. Aku tanya kamu dulu...")
+        answer = await ask(
+            f"🔐 {provider.label} mengirim kode verifikasi ke email/HP-mu.\n\n"
+            "Kirim kodenya ke sini, aku lanjutkan sendiri. Contoh: `483920`"
+        )
+        code = (answer or "").strip()
+        if not code:
+            if result is not None:
+                result.message = "Kode verifikasi tidak dikirim, jadi aku hentikan dulu."
+            return False
+
+        try:
+            await code_field.fill(code, timeout=8000)
+            if progress:
+                await progress(40, "Kode aku isi, mengirim...")
+            await self._submit(page)
+            await asyncio.sleep(4)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("verification submit failed: %s", exc)
+            if result is not None:
+                result.message = "Gagal mengirim kode verifikasi ke situs."
+            return False
+
+        if await self._login_wall(page):
+            if result is not None:
+                result.message = (
+                    "Kode verifikasi belum diterima situs. Coba kirim `ambil key "
+                    + provider.name + "` lagi, nanti aku minta kode baru."
+                )
+            return False
+        return True
+
     async def harvest(
         self,
         provider: Provider,
         *,
         user_id: int = 0,
         progress=None,
+        ask=None,
     ) -> HarvestResult:
-        """Create one key on the provider console using the saved session."""
+        """Create one key on the provider console using the saved session.
+
+        ``ask`` is the handoff hook: an async callable ``ask(question) -> answer``
+        used when the site demands a one-time code that only the user can read.
+        Without it, a verification screen is reported as needing the user rather
+        than guessed at.
+        """
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -272,7 +362,32 @@ class KeyHarvester:
                                 await self._shot(page, f"{provider.name}-2-after-login")
                             )
 
-                    if await self._login_wall(page):
+                    # A verification screen is not the same as "no account": the
+                    # saved login worked, the site just wants a code that only the
+                    # user can read. It is detected by the code field itself, not
+                    # by the sign-in wording, because an OTP page rarely says
+                    # "sign in" - it says "verify".
+                    if signed and await self._needs_verification(page):
+                        if ask is None:
+                            # No way to reach the user, so say so. Guessing a
+                            # code would be wrong, and carrying on would scrape
+                            # the verification page and report a bogus failure.
+                            result.needs_login = True
+                            result.message = (
+                                f"{provider.label} minta kode verifikasi yang cuma "
+                                "kamu yang bisa baca.\n\n"
+                                "Kirim `ambil key " + provider.name + "` lagi dari "
+                                "chat, nanti aku minta kodenya ke kamu."
+                            )
+                            return result
+                        if await self._handle_verification(
+                            page, provider, ask=ask, progress=progress, result=result
+                        ):
+                            pass  # through the wall, continue to key creation
+                        else:
+                            result.needs_login = True
+                            return result
+                    elif await self._login_wall(page):
                         result.needs_login = True
                         if signed:
                             result.message = (

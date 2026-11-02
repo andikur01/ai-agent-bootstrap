@@ -294,6 +294,9 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     if settings.telegram_api_base:
         app = app.base_url(settings.telegram_api_base)
     app = app.build()
+    # Tasks running in the background need a way to send messages - a
+    # verification question arrives mid-task, not in response to an update.
+    bot._app = app
 
     # Group -1: the authorisation gate must run before anything else.
     app.add_handler(

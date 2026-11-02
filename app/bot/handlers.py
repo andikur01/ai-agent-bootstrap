@@ -38,6 +38,7 @@ from app.core.intent import Intent, Route
 from app.core.logging_setup import get_logger
 from app.core.orchestrator import HELP_TEXT, Orchestrator
 from app.core.progress import ConfirmationGate, ProgressReporter, parse_decision
+from app.services.handoff import HandoffService
 from app.security.redact import redact
 
 log = get_logger(__name__)
@@ -265,13 +266,17 @@ MENU_TEXT = (
     "💬 Asisten Ngobrol - ngobrol natural dan mengingat semuanya.\n\n"
     "Mau paksa satu ahli? Bilang: `buatkan video, kasih ke ahlinya`\n\n"
 
-    "*🔐 Akses browser pakai akunmu*\n"
-    "Kalau ada situs yang butuh login, aku bisa masuk sendiri pakai akun yang\n"
-    "kamu simpan - jadi kamu tidak perlu buka browser lagi.\n"
-    "Cara simpan: `/akun <situs> <email> <password>`\n"
-    "  contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
+    "*🔐 Akses browser pakai akunmu (biar bisa buka SEMUA situs)*\n"
+    "Banyak situs butuh login. Kalau kamu kasih akunnya sekali, aku bisa masuk\n"
+    "sendiri dan kerjakan tugas di dalam akun itu - kamu tidak perlu buka browser.\n"
+    "Langkahnya:\n"
+    "1) Kirim: `/akun <situs> <email> <password>`\n"
+    "   contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
+    "2) Selesai. Setelah itu cukup bilang `buka canva dan buatkan desain`.\n"
     "Password disimpan terenkripsi di serverku, tidak pernah aku tulis ulang di\n"
     "chat atau di log, dan pesanmu berisi password aku hapus otomatis.\n"
+    "Kalau situsnya minta kode dari email/HP, aku berhenti dan minta kode itu ke\n"
+    "kamu, lalu aku lanjutkan sendiri - tidak perlu mulai dari awal.\n"
     "`/akun` - lihat daftar akun tersimpan (password disensor).\n"
     "`/akun hapus <situs>` - hapus akun.\n\n"
 
@@ -408,8 +413,16 @@ class TelegramBot:
         self.vault = vault or getattr(harvester, "vault", None)
         self.discovery = discovery
         self.gate = ConfirmationGate(timeout_seconds=180)
+        # Questions that need the human: verification codes, captchas. Kept
+        # separate from the confirmation gate because the answer is free text,
+        # not yes/no, and because a task is already running while we wait.
+        self.handoff = HandoffService(
+            timeout_seconds=int(getattr(settings, "handoff_timeout_seconds", 300))
+        )
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
         self._running: dict[int, asyncio.Task] = {}
+        # The chat a waiting task should answer into, set while a task runs.
+        self._active_chat: dict[int, int] = {}
 
     @property
     def gateway(self):
@@ -475,6 +488,15 @@ class TelegramBot:
         await self.store.upsert_user(user.id, user.username or "", user.first_name or "")
 
         text = (message.text or message.caption or "").strip()
+
+        # A task waiting on the user - a one-time code, a captcha confirmation -
+        # gets the next message before anything else sees it. Only a real
+        # answer is consumed: a fresh command still routes normally, so a user
+        # who changes their mind is not trapped in the question.
+        if self.handoff.pending(user.id) is not None and text and not text.startswith("/"):
+            if self.handoff.answer(user.id, text):
+                await message.reply_text("👍 Kode diterima, aku lanjutkan sendiri.")
+                return
 
         # A pending confirmation intercepts the next message.
         pending = self.gate.get(user.id)
@@ -612,6 +634,32 @@ class TelegramBot:
         except Exception:  # noqa: BLE001 - never block a task on prefs
             return False
         return bool(prefs.get("free_mode"))
+
+    async def _ask_user(self, user_id: int, question: str, *, chat_id: int | None = None) -> str | None:
+        """Ask the user something only they can answer, and wait for it.
+
+        Used mid-task, so the question goes to the chat the task is running in.
+        Returns None on timeout, which callers must treat as "cannot continue"
+        rather than as an empty answer.
+        """
+        chat = chat_id or self._active_chat.get(user_id)
+        pending = self.handoff.ask_nowait(user_id, question)
+        if chat is not None:
+            try:
+                await self.bot_send(chat, question)
+            except Exception as exc:  # noqa: BLE001 - the wait below is pointless
+                log.warning("could not send handoff question: %s", exc)
+                self.handoff.cancel(user_id)
+                return None
+        return await self.handoff.wait(pending)
+
+    async def bot_send(self, chat_id: int, text: str) -> None:
+        """Send a message outside the update flow, e.g. from a running task."""
+        app = getattr(self, "_app", None)
+        if app is None:
+            log.info("handoff question (no app): %s", text[:120])
+            return
+        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
     # ---------------------------------------------------------- confirmation
     async def _ask_confirmation(self, message, user_id: int, route: Route) -> None:
@@ -754,15 +802,21 @@ class TelegramBot:
         try:
             async with TypingIndicator(message.chat):
                 await progress(5, "Mulai...")
-                outcome = await self.orch.execute(
-                    user_id,
-                    route,
-                    progress=progress,
-                    photo_path=str(route.args.get("photo_path") or ""),
-                    voice_path=str(route.args.get("voice_path") or ""),
-                    document_path=str(route.args.get("document_path") or ""),
-                    chat_id=message.chat_id,
-                )
+                # Remember where to reach this user while the task runs, so a
+                # mid-task question (a verification code) lands in this chat.
+                self._active_chat[user_id] = message.chat_id
+                try:
+                    outcome = await self.orch.execute(
+                        user_id,
+                        route,
+                        progress=progress,
+                        photo_path=str(route.args.get("photo_path") or ""),
+                        voice_path=str(route.args.get("voice_path") or ""),
+                        document_path=str(route.args.get("document_path") or ""),
+                        chat_id=message.chat_id,
+                    )
+                finally:
+                    self._active_chat.pop(user_id, None)
             await self.store.update_task(task_id, "done", outcome.text[:500])
 
             # Milestone screenshots first: evidence before the summary.
@@ -1345,7 +1399,14 @@ class TelegramBot:
             except Exception:  # noqa: BLE001
                 pass
 
-        result = await self.harvester.harvest(provider, user_id=user_id, progress=report)
+        chat_id = update.effective_message.chat_id if update.effective_message else None
+
+        async def ask(question: str) -> str | None:
+            return await self._ask_user(user_id, question, chat_id=chat_id)
+
+        result = await self.harvester.harvest(
+            provider, user_id=user_id, progress=report, ask=ask
+        )
 
         if result.needs_login:
             from app.llm.capacity import acquire_message
@@ -1709,7 +1770,12 @@ class TelegramBot:
             return "failed"
 
         user_id = update.effective_user.id
-        result = await self.harvester.harvest(provider, user_id=user_id)
+        chat_id = update.effective_message.chat_id if update.effective_message else None
+
+        async def ask(question: str) -> str | None:
+            return await self._ask_user(user_id, question, chat_id=chat_id)
+
+        result = await self.harvester.harvest(provider, user_id=user_id, ask=ask)
         if result.needs_login:
             return "login"
         if not result.ok:
