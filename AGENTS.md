@@ -159,3 +159,47 @@ only through `/keys auto` defeats it, so `_parse_harvest_request` in
 excluded on purpose - automating signup is what gets accounts banned, so that
 stays manual. When no provider is named, try all of them and report which ones
 still need a login; a useful partial answer beats a question bounced back.
+
+## Generated sites: three traps that each look like a different bug
+
+Every one of these made a deployed site fail its own quality gate, and each
+presented as a different symptom, so they are worth stating plainly.
+
+**aiohttp hands the handler the request, not the captured path.** The route was
+`/s/{name}/{path:.*}` with a handler `_serve_file(self, request, path="")`. The
+`{path}` group never reached the parameter, so `path` was always the default and
+every request - `/styles.css`, `/script.js` - was answered with `index.html`.
+Sites loaded unstyled with no JavaScript. Read `request.match_info["path"]`.
+
+**Models sometimes double-escape file contents.** The model returns valid JSON
+whose string values are themselves escaped, so a newline arrives as the two
+characters `\n`. The JSON parses, nothing raises, and the written file is one
+long line - which the browser reports as "Invalid or unexpected token" for JS.
+`_decode_double_escaped` in `app/services/web_builder.py` undoes that second
+round, but only when the whole file is escaped and `\n` never appears as real
+newlines, so genuine backslashes survive. Encode `latin-1` with
+`backslashreplace` first, or `unicode_escape` mojibakes every emoji.
+
+**Browsers request `/favicon.ico` whether or not the page links it.** A 404
+lands in the console as "Failed to load resource" and failed QA on every site.
+Serve a default icon.
+
+Two more, from the quality gate and the LLM gateway:
+
+**A short page full of controls is not an empty page.** Judging content by
+visible text length alone flagged every login or dashboard page as "konten
+terlalu sedikit" and sent the repair loop after a defect that did not exist.
+`PageReport.ok` now also counts interactive elements.
+
+**"Request too large" is not a rate limit on the key.** The free Groq tier caps
+at 8000 tokens per minute, and a full web-build prompt of ~11k was rejected
+every time. The gateway used to bench and rotate a perfectly healthy key, which
+could never help, because the limit is on the prompt. It now trims the prompt
+and the output reservation, then retries: verified live, 12530 tokens ->
+shrink->3000 -> ok.
+
+**Deploy provider order matters, and the local host is last.** The runtime
+publishes two ports. `SiteHost` serves generated sites there and needs no token,
+which is the only provider that works with a fine-grained GitHub token that
+cannot create repositories. Reuse the host started at boot - a second one tries
+to bind a port that is already taken and fails silently.
