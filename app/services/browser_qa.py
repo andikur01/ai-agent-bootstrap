@@ -39,6 +39,11 @@ class PageReport:
     text_length: int = 0
     interactive_count: int = 0
     horizontal_overflow: bool = False
+    # Did the page actually take its styling from a stylesheet? A page whose
+    # classes resolve to browser defaults looks like plain black text on white -
+    # the "polosan" result the user kept getting. Measured, not guessed.
+    styled: bool = True
+    custom_properties: int = 0
 
     @property
     def ok(self) -> bool:
@@ -54,6 +59,7 @@ class PageReport:
             and not self.failed_requests
             and not self.horizontal_overflow
             and has_content
+            and self.styled
         )
 
     def issues(self) -> list[str]:
@@ -67,6 +73,11 @@ class PageReport:
             problems.append("layout overflow horizontal (tidak responsif)")
         if self.text_length <= 200 and self.interactive_count < 3:
             problems.append("konten halaman terlalu sedikit / kosong")
+        if not self.styled:
+            problems.append(
+                "halaman tidak ter-styling: stylesheet tidak berpengaruh, "
+                "tampil polosan tanpa warna"
+            )
         return problems
 
 
@@ -222,6 +233,43 @@ class BrowserQA:
                             "() => document.documentElement.scrollWidth > window.innerWidth + 4"
                         )
                         page_report.horizontal_overflow = bool(overflow)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    # Is the page actually styled? A stylesheet that loaded but
+                    # does not apply - or was never linked - leaves the browser's
+                    # default serif-on-white look. Two signals, both cheap and
+                    # both hard to fake: custom properties defined on :root (our
+                    # design system always defines many) and whether the body
+                    # still uses the browser's default font.
+                    try:
+                        measured = await page.evaluate(
+                            "() => {"
+                            "  const cs = getComputedStyle(document.body);"
+                            "  let props = 0;"
+                            "  for (const s of document.styleSheets) {"
+                            "    try { for (const r of s.cssRules) {"
+                            "      if (r.style && r.style.length) {"
+                            "        for (const p of r.style) if (p.startsWith('--')) props++;"
+                            "      }"
+                            "    } } catch (e) {}"
+                            "  }"
+                            "  return {"
+                            "    props: props,"
+                            "    font: cs.fontFamily || '',"
+                            "    bg: cs.backgroundColor || '',"
+                            "    links: document.querySelectorAll('link[rel=stylesheet]').length"
+                            "  };"
+                            "}"
+                        )
+                        props = int(measured.get("props") or 0)
+                        font = str(measured.get("font") or "")
+                        page_report.custom_properties = props
+                        # A page with no custom properties at all AND the browser
+                        # default font is unstyled. Requiring both avoids a false
+                        # alarm on a legitimately minimal page.
+                        defaultish = "serif" in font and "times" in font
+                        page_report.styled = not (props == 0 and defaultish)
                     except Exception:  # noqa: BLE001
                         pass
 

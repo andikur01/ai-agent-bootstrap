@@ -482,6 +482,49 @@ section {{ padding-block: clamp(3rem, 7vw, 6rem); }}
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
 }}
+
+/* ---------- layout utilities ----------
+   The model reaches for these names because they are what it was trained on.
+   They were missing from the stylesheet, so `class="flex items-center
+   justify-between"` on a header did nothing and the page collapsed into a
+   single column of unstyled blocks. Every utility the prompt mentions must
+   exist here, or the markup and the design drift apart. */
+.flex {{ display: flex; }}
+.inline-flex {{ display: inline-flex; }}
+.grid-2, .grid-3 {{ display: grid; gap: clamp(1rem, 2.5vw, 1.75rem); grid-template-columns: 1fr; }}
+.items-center {{ align-items: center; }}
+.items-start {{ align-items: flex-start; }}
+.justify-between {{ justify-content: space-between; }}
+.justify-center {{ justify-content: center; }}
+.flex-wrap {{ flex-wrap: wrap; }}
+.gap-2 {{ gap: .5rem; }}
+.gap-4 {{ gap: 1rem; }}
+.gap-6 {{ gap: 1.5rem; }}
+.space-x-4 > * + * {{ margin-left: 1rem; }}
+.space-y-2 > * + * {{ margin-top: .5rem; }}
+.space-y-4 > * + * {{ margin-top: 1rem; }}
+.list-none {{ list-style: none; padding: 0; margin: 0; }}
+.text-center {{ text-align: center; }}
+.mx-auto {{ margin-inline: auto; }}
+.mt-0 {{ margin-top: 0; }}
+.mb-0 {{ margin-bottom: 0; }}
+.hero-content {{ display: grid; gap: 1rem; align-content: center; }}
+
+/* Typography the markup refers to. `.h1`/`.lead` are not element selectors, so
+   they needed real rules or the hero fell back to plain body text. */
+.h1 {{ font-size: clamp(2.4rem, 5vw, 4rem); font-weight: 800; line-height: 1.1;
+  letter-spacing: -.02em; margin: 0 0 .4em; }}
+.h2 {{ font-size: clamp(1.8rem, 3.2vw, 2.6rem); font-weight: 700; line-height: 1.15;
+  letter-spacing: -.02em; margin: 0 0 .5em; }}
+.h3 {{ font-size: clamp(1.2rem, 1.8vw, 1.5rem); font-weight: 600; margin: 0 0 .5em; }}
+.lead {{ font-size: clamp(1.05rem, 1.6vw, 1.3rem); color: var(--text-muted); max-width: 60ch; }}
+
+@media (min-width: 720px) {{
+  .grid-2, .grid-3 {{ grid-template-columns: repeat(2, 1fr); }}
+}}
+@media (min-width: 1000px) {{
+  .grid-3 {{ grid-template-columns: repeat(3, 1fr); }}
+}}
 """
 
 

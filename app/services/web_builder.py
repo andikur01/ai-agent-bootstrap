@@ -251,6 +251,21 @@ class WebBuilder:
         )
         if html_entry is not None:
             html_entry["content"] = _wire_head(str(html_entry.get("content") or ""), direction)
+            # Backfill any class the markup uses but the sheet does not define.
+            # The prompt lists the allowed classes, but a model will still reach
+            # for one it knows from elsewhere; that used to ship as a page with
+            # half its layout missing. Now the gap is closed in code, not hoped
+            # away, and the build records what it patched.
+            sheet, patched = _backfill_missing_classes(
+                str(html_entry["content"]), base_stylesheet(direction)
+            )
+            if patched:
+                log.info(
+                    "backfilled %d missing CSS classes: %s",
+                    len(patched), ", ".join(patched[:10]),
+                )
+            css_entry = next(e for e in files if e.get("path") == "styles.css")
+            css_entry["content"] = sheet
         spec["design"] = direction.key
         return spec
 
@@ -415,6 +430,104 @@ def _decode_double_escaped(content: str) -> str:
     if decoded.count("\n") == content.count("\\n"):
         return decoded
     return content
+
+
+def _backfill_missing_classes(html: str, sheet: str) -> tuple[str, list[str]]:
+    """Define every class the markup uses but the stylesheet does not.
+
+    The prompt names the classes the model may use, and the stylesheet defines
+    them. In practice a model also reaches for a utility it knows from elsewhere
+    (``space-x-4``, ``items-center``), and an undefined class is not an error -
+    the layout silently loses a rule. That is how a site shipped looking plain.
+
+    Rather than trusting the model, measure: read the classes out of the HTML,
+    diff them against the sheet, and append a rule for each gap. Unknown names
+    get a safe default keyed off the name's prefix. Returns the sheet to use and
+    the names that were patched, for the log.
+    """
+    used: set[str] = set()
+    for match in re.findall(r'class="([^"]*)"', html):
+        used.update(part for part in match.split() if part)
+
+    # A class counts as defined only if the sheet has a selector for it.
+    missing = [
+        name for name in sorted(used)
+        if not re.search(rf"\.{re.escape(name)}(?![\w-])", sheet)
+    ]
+    if not missing:
+        return sheet, []
+
+    rules = [_default_rule_for(name) for name in missing]
+    block = "\n/* --- auto: classes the markup used but the sheet lacked --- */\n" + "\n".join(rules)
+    return sheet + block + "\n", missing
+
+
+def _default_rule_for(name: str) -> str:
+    """A safe rule for an unknown class, chosen from its name.
+
+    A utility the model invented should do *something* reasonable rather than
+    nothing. The mapping is deliberately small and conservative: it covers the
+    utility families a page actually needs and leaves anything unrecognised as a
+    no-op, because inventing a visual style for an unknown name is worse than
+    leaving it alone.
+    """
+    n = name.lower()
+    if n.startswith("gap-"):
+        value = _scale_value(n)
+        return f".{name} {{ gap: {value}; }}"
+    if n.startswith("space-x-"):
+        return f".{name} > * + * {{ margin-left: {_scale_value(n)}; }}"
+    if n.startswith("space-y-"):
+        return f".{name} > * + * {{ margin-top: {_scale_value(n)}; }}"
+    if n.startswith("p-"):
+        return f".{name} {{ padding: {_scale_value(n)}; }}"
+    if n.startswith("px-"):
+        return f".{name} {{ padding-inline: {_scale_value(n)}; }}"
+    if n.startswith("py-"):
+        return f".{name} {{ padding-block: {_scale_value(n)}; }}"
+    if n.startswith("m-"):
+        return f".{name} {{ margin: {_scale_value(n)}; }}"
+    if n.startswith("mt-"):
+        return f".{name} {{ margin-top: {_scale_value(n)}; }}"
+    if n.startswith("mb-"):
+        return f".{name} {{ margin-bottom: {_scale_value(n)}; }}"
+    if n.startswith("text-") and n.endswith(("xl", "lg", "sm", "xs", "base")):
+        return f".{name} {{ font-size: {_font_scale(n)}; }}"
+    if n.startswith("rounded"):
+        return f".{name} {{ border-radius: var(--radius); }}"
+    if n.startswith("shadow"):
+        return f".{name} {{ box-shadow: var(--shadow); }}"
+    if n.startswith("w-"):
+        return f".{name} {{ width: {_scale_value(n)}; }}"
+    if n.startswith("max-w-"):
+        return f".{name} {{ max-width: {_scale_value(n)}; }}"
+    if n.startswith("font-bold"):
+        return f".{name} {{ font-weight: 700; }}"
+    if n.startswith("font-semibold"):
+        return f".{name} {{ font-weight: 600; }}"
+    if n.startswith("text-center"):
+        return f".{name} {{ text-align: center; }}"
+    return f".{name} {{ /* auto: unknown utility, intentionally a no-op */ }}"
+
+
+def _scale_value(name: str) -> str:
+    """Map a Tailwind-ish suffix to a real length. ``gap-6`` -> ``1.5rem``."""
+    digits = re.findall(r"(\d+)", name)
+    if not digits:
+        return "1rem"
+    step = int(digits[-1])
+    # Tailwind's 4px scale, capped so a typo like gap-96 cannot blow up a layout.
+    step = max(0, min(step, 16))
+    return f"{step * 0.25:g}rem"
+
+
+def _font_scale(name: str) -> str:
+    table = {"xs": ".78rem", "sm": ".875rem", "base": "1rem", "lg": "1.15rem",
+             "xl": "1.3rem", "2xl": "1.6rem", "3xl": "2rem", "4xl": "2.6rem"}
+    for key, value in table.items():
+        if name.endswith(key):
+            return value
+    return "1rem"
 
 
 def _parse_json(text: str) -> dict:
