@@ -42,6 +42,7 @@ class Application:
     orchestrator: Orchestrator
     scheduler: SchedulerService
     bot: TelegramBot
+    live_view: Any = None
     telegram_app: Any = None
     _heartbeat_task: Any = None
 
@@ -141,7 +142,38 @@ class Application:
                 path.write_text(str(int(time.time())))
             except Exception as exc:  # noqa: BLE001 - never kill the bot over this
                 log.debug("heartbeat write failed: %s", exc)
+            await self._revive_live_view()
             await asyncio.sleep(interval)
+
+    async def _revive_live_view(self) -> None:
+        """Restart the screen if one of its helpers died mid-run.
+
+        The helpers are separate processes; one can be killed on its own - by
+        the container, by a port clash, by anything. The bot itself stays
+        healthy, so the supervisor never restarts it and the user is left with
+        a dead viewer URL and no explanation. Checking here, on a timer the
+        bot already runs, brings the screen back without a full restart.
+        """
+        view = self.live_view
+        if view is None:
+            return
+        state = getattr(view, "state", None)
+        if state is None:
+            return
+        if state.running and all(
+            getattr(proc, "returncode", None) is None
+            for proc in (state.xvfb, state.x11vnc, state.websockify)
+        ):
+            return
+        try:
+            revived = await view.ensure()
+        except Exception as exc:  # noqa: BLE001 - never kill the bot over this
+            log.warning("live view revive failed: %s", exc)
+            return
+        if revived.running:
+            log.info("live view revived on %s", revived.display)
+        else:
+            log.warning("live view still down: %s", "; ".join(revived.errors) or "unknown")
 
     async def stop(self) -> None:
         if self._heartbeat_task is not None:
@@ -290,6 +322,7 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
 
     return Application(
         settings=settings,
+        live_view=live_view,
         store=store,
         gateway=gateway,
         budget=budget,
