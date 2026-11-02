@@ -438,6 +438,64 @@ berikutnya. Cek stok: `/stok`
 Bacaan lengkap: **`DEPLOY-24JAM.md`**
 
 ---
+## KABAR BAGUS 6: bot sekarang tes dirinya sendiri (kayak aku)
+
+Kamu bilang: *"buat bot gua kerjanya seperti kamu, sampai aman dan cerdas,
+selalu tes."* **Sudah.** Ini yang aku tambahkan.
+
+### Bot sekarang punya "sandbox"
+
+Tempat dia **menjalankan kodenya sendiri dulu** sebelum kirim ke kamu. Kalau
+jelek, dia perbaiki sendiri (maksimal 3x). Kalau tetap jelek, dia **bilang
+terus terang** — bukan ngaku sukses.
+
+Ketik `/tes` di Telegram. Bot bakal buktikan sendiri:
+
+```
+🧪 Hasil tes sendiri
+
+Isolasi: Docker (python:3.11-slim), jaringan: mati
+Kekuatan isolasi: kuat — kode tidak bisa baca .env bot.
+
+1️⃣ Kode benar → ✅ LULUS
+2️⃣ Kode error → ✅ terdeteksi gagal
+3️⃣ Coba curi .env → ✅ gagal (aman)
+```
+
+**Itu tes nyata, bukan klaim.** Aku sudah kirim hasilnya ke Telegram kamu.
+
+### Kenapa "coba curi .env" itu penting
+
+Karena kalau bot bisa jalanin kode sembarangan, kode itu **bisa baca token
+kamu.** Jadi aku tes: kode jahat dimasukkan ke sandbox, coba baca `.env`.
+
+Hasilnya: `BACA_ENV=False | TOKEN=None` — **tidak bisa.** Bot tidak bocorin
+secret kamu.
+
+Tapi jujur: kalau Docker tidak ada di server, isolasinya **lemah** (kode masih
+bisa baca file di server). Bot bakal **bilang begitu terus terang**, bukan
+diam-diam ngaku aman.
+
+### Bot juga pakai gerbang ini untuk tugas nyata
+
+- **Website** → dibuka Playwright, screenshot, cek console error, cek
+  desktop+mobile. Gagal? perbaiki, deploy ulang, tes lagi.
+- **Gambar/video/audio** → dicek: blank? senyap? rusak? Gagal? bikin ulang.
+- **Kode** → dijalankan di sandbox. Error? perbaiki, jalanin lagi.
+
+### Bonus: aku nemu 2 BUG NYATA waktu ngetes ini
+
+**Bug 1:** Waktu kamu minta bikin website tadi, bot **CRASH** — pesanmu nggak
+diproses sama sekali. Ternyata ada salah tipe data (token disimpan sebagai
+pasangan angka, bukan satu angka). Sudah diperbaiki.
+
+**Bug 2:** Perintah `/tes`-nya sendiri crash pertama kali dijalankan. Nama
+variabelnya salah. Sudah diperbaiki.
+
+**Dua-duanya ketemu karena aku jalankan beneran, bukan cuma percaya kode.**
+Itu bedanya.
+
+---
 ## LANGKAH PERTAMAMU (2 menit)
 
 Kirim akun buanganmu:
