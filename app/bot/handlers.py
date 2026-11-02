@@ -282,8 +282,9 @@ MENU_TEXT = (
     "1) Kirim: `/akun <situs> <email> <password>`\n"
     "   contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
     "2) Selesai. Setelah itu cukup bilang `buka canva dan buatkan desain`.\n"
-    "Password disimpan terenkripsi di serverku, tidak pernah aku tulis ulang di\n"
-    "chat atau di log, dan pesanmu berisi password aku hapus otomatis.\n"
+    "Password disimpan di serverku dengan izin file 0600 (hanya aku yang bisa\n"
+    "baca) - tidak di-commit, tidak pernah aku tulis ulang di chat atau di log,\n"
+    "dan pesanmu berisi password aku hapus otomatis.\n"
     "Kalau situsnya minta kode dari email/HP, aku berhenti dan minta kode itu ke\n"
     "kamu, lalu aku lanjutkan sendiri - tidak perlu mulai dari awal.\n"
     "`/akun` - lihat daftar akun tersimpan (password disensor).\n"
@@ -389,6 +390,19 @@ def _is_token_request(text: str) -> bool:
         phrase in lowered
         for phrase in ("berapa token", "token terpakai", "pakai token", "biaya token", "harga token")
     )
+
+
+def _specialist_label(key: str) -> str:
+    """Human label for the expert that handled a task, e.g. "🌐 Ahli Web"."""
+    try:
+        from app.core.specialists import by_key
+
+        expert = by_key(key)
+        if expert is not None:
+            return f"Dikerjakan {expert.label()}"
+    except Exception:  # noqa: BLE001 - a missing label is not worth a failure
+        pass
+    return ""
 
 
 def _looks_like_credentials(text: str) -> bool:
@@ -901,6 +915,11 @@ class TelegramBot:
             # look, and stays off the conversation.
             if outcome.tokens and _is_token_request(text):
                 body += f"\n\n_Token terpakai: {outcome.tokens:,}_"
+            # Say who did the work. The user asked for tasks to be handed to the
+            # right expert; without a name on the reply there is no way to tell
+            # whether that actually happened. Only on real work, not on chat.
+            if outcome.specialist and route.intent not in {Intent.CHAT, Intent.HELP}:
+                body += f"\n\n_{_specialist_label(outcome.specialist)}_"
             await send_text(message, body)
 
             for path in outcome.files or []:
