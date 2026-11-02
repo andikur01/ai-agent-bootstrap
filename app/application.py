@@ -16,6 +16,7 @@ from app.core.orchestrator import Orchestrator
 from app.db.store import Store
 from app.llm.budget import BudgetGuard
 from app.llm.cache import SemanticCache
+from app.llm.cost_guard import CostGuard
 from app.llm.gateway import LLMGateway
 from app.llm.key_pool import build_key_pool
 from app.memory.artifacts import ArtifactRegistry
@@ -139,8 +140,9 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
     vectors = build_vector_store(settings, store, embedder)
     registry = ArtifactRegistry(store)
     budget = BudgetGuard(store, settings.daily_token_budget)
+    cost_guard = CostGuard(settings.daily_token_budget)
     key_pool = build_key_pool(settings, state_file=settings.data_path / "key_pool.json")
-    gateway = LLMGateway(settings, budget=budget, key_pool=key_pool)
+    gateway = LLMGateway(settings, budget=budget, key_pool=key_pool, cost_guard=cost_guard)
     memory = MemoryManager(store, vectors, registry, settings, gateway=gateway)
     cache = SemanticCache(
         store, embedder, enabled=settings.semantic_cache_enabled
@@ -168,6 +170,7 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
         profiles=profiles,
         vault=vault,
         live_view=live_view,
+        cost_guard=cost_guard,
     )
 
     async def notifier(chat_id: int, text: str) -> None:
@@ -302,6 +305,8 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("help", bot.cmd_help))
     app.add_handler(CommandHandler("bantu", bot.cmd_help))
     app.add_handler(CommandHandler("menu", bot.cmd_menu))
+    app.add_handler(CommandHandler("hidupkan", bot.cmd_hidupkan))
+    app.add_handler(CommandHandler("mode", bot.cmd_mode))
     app.add_handler(CommandHandler("status", bot.cmd_status))
     app.add_handler(CommandHandler("status_model", bot.cmd_status_model))
     app.add_handler(CommandHandler("belajar", bot.cmd_belajar))

@@ -108,6 +108,15 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
 # Full help stays available behind /help, but the menu shows only what is
 # actually in use. A wall of commands for features nobody calls is noise.
 HELP_EXTRA = (
+    "⚡ *MODE*\n\n"
+    "`/hidupkan` - Mode bebas: aku putuskan sendiri, tidak tanya tiap langkah\n"
+    "`/hidupkan off` - Balik tanya dulu sebelum tugas berat\n"
+    "`/mode` - Lihat mode aktif + token terpakai hari ini\n\n"
+    "🔐 *AKUN (buat login otomatis di browser)*\n\n"
+    "`/akun <situs> <email> <password>` - Simpan akun, aku yang login sendiri\n"
+    "`/akun` - Lihat daftar akun (password disensor)\n"
+    "`/akun hapus <situs>` - Hapus akun\n"
+    "Kalau situs kirim kode verifikasi ke emailmu, aku minta kodenya ke kamu.\n\n"
     "🌐 *WEB*\n\n"
     "`/buat_web` <deskripsi> - Situs statis profesional\n"
     "`/buat_web_full` <deskripsi> - Fullstack: login + database\n"
@@ -228,29 +237,83 @@ def _provider_names_for_auto() -> list[str]:
 
 
 MENU_TEXT = (
-    "🤖 *Yang bisa aku kerjakan*\n\n"
+    "🤖 *Aku asisten pribadimu - dan aku punya ahli di tiap bidang*\n\n"
     "Kamu tidak perlu hafal perintah. Tulis saja maumu pakai bahasa biasa,\n"
-    "aku yang cari tahu maksudnya. Perintah `/` cuma jalan pintas, bukan syarat.\n\n"
+    "aku yang cari tahu maksudnya.\n\n"
+
+    "*⚡ Menghidupkan bot (mode bebas)*\n"
+    "`/hidupkan` - Aku berhenti nanya-nanya. Tugas berat langsung aku kerjakan,\n"
+    "aku putuskan sendiri caranya, lalu aku lapor hasilnya.\n"
+    "`/hidupkan off` - Balik tanya dulu sebelum tugas berat.\n"
+    "`/mode` - Lihat mode aktif + token terpakai hari ini.\n\n"
+    "Bedanya: tanpa mode bebas, tiap tugas berat aku minta izin dulu (ya/tidak)\n"
+    "supaya kamu tahu biayanya. Dengan mode bebas, aku jalan sendiri. Pengaman\n"
+    "biaya tetap jalan di dua-duanya, jadi token tidak kebablasan.\n\n"
+
+    "*👥 Ahli di tiap bidang*\n"
+    "Aku bukan satu asisten serba bisa. Tiap jenis kerja aku serahkan ke ahlinya,\n"
+    "dan tiap ahli punya standar sendiri:\n"
+    "🌐 Ahli Web - situs & web app. Dilarang lorem ipsum, wajib dark mode,\n"
+    "   wajib lolos tes browser sebelum aku kirim ke kamu.\n"
+    "🎨 Ahli Gambar - bikin & edit gambar, cek hasil dulu sebelum dikirim.\n"
+    "🎬 Ahli Video - bikin & edit video, selalu cek durasi dan suara.\n"
+    "🎵 Ahli Audio - suara & musik, teks ke suara dan suara ke teks.\n"
+    "⚙️ Ahli Otomasi - workflow n8n yang benar-benar jalan.\n"
+    "📚 Ahli Riset - cari di internet, rangkum, simpan permanen.\n"
+    "🔗 Ahli Link - tonton/baca isi link lalu jawab pertanyaanmu.\n"
+    "🧠 Ahli Analisis - berpikir sistematis untuk masalah rumit.\n"
+    "💬 Asisten Ngobrol - ngobrol natural dan mengingat semuanya.\n\n"
+    "Mau paksa satu ahli? Bilang: `buatkan video, kasih ke ahlinya`\n\n"
+
+    "*🔐 Akses browser pakai akunmu*\n"
+    "Kalau ada situs yang butuh login, aku bisa masuk sendiri pakai akun yang\n"
+    "kamu simpan - jadi kamu tidak perlu buka browser lagi.\n"
+    "Cara simpan: `/akun <situs> <email> <password>`\n"
+    "  contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
+    "Password disimpan terenkripsi di serverku, tidak pernah aku tulis ulang di\n"
+    "chat atau di log, dan pesanmu berisi password aku hapus otomatis.\n"
+    "`/akun` - lihat daftar akun tersimpan (password disensor).\n"
+    "`/akun hapus <situs>` - hapus akun.\n\n"
+
+    "*📧 Kalau situs kirim email verifikasi*\n"
+    "Aku tidak bisa buka emailmu sendiri, jadi kalau situs minta kode, aku akan\n"
+    "berhenti dan minta kode itu ke kamu di chat. Kamu kirim kodenya, aku\n"
+    "lanjutkan sendiri dari titik itu - tidak perlu mulai dari awal.\n\n"
+
     "*🌐 Website*\n"
     "Situs statis (landing page, portofolio, toko) dan web fullstack dengan\n"
     "login + database. Aku tulis kodenya, aku tes sendiri pakai browser, aku\n"
-    "screenshot, baru aku kirim. Kalau jelek aku perbaiki dulu, bukan dikirim\n"
-    "mentah. Contoh: `buatkan web toko kopi`\n\n"
+    "screenshot, baru aku kirim. Kalau jelek aku perbaiki dulu.\n"
+    "Contoh: `buatkan web toko kopi`\n\n"
+
     "*⚙️ Otomasi*\n"
     "Workflow n8n siap impor, plus pengingat dan jadwal berulang.\n"
     "Contoh: `buatkan workflow n8n untuk balas chat otomatis`\n\n"
-    "*🖼️ Gambar & video*\n"
+
+    "*🖼️ Gambar, video, suara*\n"
     "Buat dan edit gambar, buat dan edit video, teks ke suara, suara ke teks.\n"
     "Contoh: `buatkan poster anak-anak`\n\n"
+
     "*🔗 Link*\n"
     "Kirim link apa saja - YouTube, TikTok, IG, artikel. Aku ambil isinya,\n"
-    "aku tonton/transkrip, lalu jawab pertanyaanmu tentang isi link itu.\n\n"
+    "aku tonton/transkrip, lalu jawab pertanyaanmu tentang isi link itu.\n"
+    "Kalau linknya diblokir, aku coba cara lain dulu. Kalau tetap gagal, aku\n"
+    "minta file-nya ke kamu.\n\n"
+
     "*💬 Ngobrol & ingatan*\n"
     "Aku ingat semua obrolan kita. \"lanjutkan yang tadi\", \"perbaiki yang\n"
     "kemarin\" - aku tahu persis yang mana. Tanya \"apakah webnya sudah jadi?\"\n"
     "kapan saja, aku jawab dari catatanku.\n\n"
+
     "*📚 Belajar*\n"
     "`belajar <topik>` - aku cari di internet, rangkum, simpan permanen.\n\n"
+
+    "*💰 Token & biaya*\n"
+    "Aku hemat: jawaban serupa aku ambil dari cache, konteks aku potong, model\n"
+    "kecil untuk ngobrol, model besar hanya untuk tugas berat. Ada batas harian\n"
+    "dan batas per tugas, jadi tidak ada lagi kejadian 1 juta token sehari.\n"
+    "Tanya kapan saja: `berapa token terpakai?`\n\n"
+
     "Ketik `/help` untuk daftar perintah lengkap. Tapi ingat: kamu tidak butuh itu."
 )
 
@@ -531,10 +594,24 @@ class TelegramBot:
         )
 
         if route.needs_confirm and not route.args.get("confirmed"):
-            await self._ask_confirmation(message, user.id, route)
-            return
+            # Free mode is the user's own switch ("hidupkan bot"): stop asking
+            # permission for every step and start making the calls. The cost
+            # guard still caps spending, so "act on your own" never means
+            # "spend without limit".
+            if await self._free_mode(user.id):
+                route.args["confirmed"] = True
+            else:
+                await self._ask_confirmation(message, user.id, route)
+                return
 
         await self._run_task(update, context, route)
+
+    async def _free_mode(self, user_id: int) -> bool:
+        try:
+            prefs = await self.store.get_prefs(user_id)
+        except Exception:  # noqa: BLE001 - never block a task on prefs
+            return False
+        return bool(prefs.get("free_mode"))
 
     # ---------------------------------------------------------- confirmation
     async def _ask_confirmation(self, message, user_id: int, route: Route) -> None:
@@ -790,6 +867,71 @@ class TelegramBot:
         invited the opposite behaviour, so the text stands alone.
         """
         await send_text(update.effective_message, MENU_TEXT)
+
+    async def cmd_hidupkan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Turn the bot loose: decide on its own instead of asking each time.
+
+        The user asked for this in these words - "cara agar menghidupkan bot",
+        "kalau berhasil begini, izinkan dia masuk browser" - so the command is
+        named after their phrasing. It flips one preference. The cost guard
+        still applies, because acting freely and spending without limit are not
+        the same thing.
+        """
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        try:
+            self._authorise(user.id)
+        except UnauthorizedUserError as exc:
+            await message.reply_text(exc.user_message)
+            return
+
+        arg = (context.args[0].lower() if context.args else "on")
+        if arg in {"off", "mati", "stop", "nonaktif"}:
+            await self.store.set_pref(user.id, "free_mode", False)
+            await message.reply_text(
+                "😴 Mode bebas dimatikan.\n"
+                "Sekarang aku tanya dulu sebelum tugas berat."
+            )
+            return
+
+        await self.store.set_pref(user.id, "free_mode", True)
+        await message.reply_text(
+            "⚡ *Mode bebas aktif.*\n\n"
+            "Mulai sekarang aku tidak tanya-tanya lagi untuk tugas berat - aku "
+            "putuskan sendiri, kerjakan, lalu lapor hasilnya.\n\n"
+            "Aku tetap minta ke kamu hanya untuk hal yang cuma kamu yang bisa: "
+            "login, izin, atau kode verifikasi yang dikirim ke emailmu.\n\n"
+            "Pengaman biaya tetap jalan, jadi token tidak kebablasan.\n"
+            "Matikan kapan saja: `/hidupkan off`",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the current mode and the daily token situation."""
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        try:
+            self._authorise(user.id)
+        except UnauthorizedUserError as exc:
+            await message.reply_text(exc.user_message)
+            return
+
+        free = await self._free_mode(user.id)
+        lines = [
+            "⚙️ *Mode sekarang*",
+            f"Bebas bertindak: {'⚡ aktif' if free else '😴 mati'}",
+        ]
+        budget = getattr(self.orch, "budget", None)
+        if budget is not None:
+            lines.append("")
+            lines.append(await budget.summary(user.id))
+        lines.append("")
+        lines.append("Ubah: `/hidupkan` atau `/hidupkan off`")
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         providers = self.settings.available_providers()

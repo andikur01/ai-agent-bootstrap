@@ -26,6 +26,7 @@ from app.core.intent import Intent, Route, route_message
 from app.core.logging_setup import get_logger
 from app.core.specialists import Specialist, for_intent as specialist_for, pick as pick_specialists
 from app.core.thinking import ThinkingEngine
+from app.llm.cost_guard import BudgetExceeded
 from app.llm.tokens import count_message_tokens, estimate
 from app.memory.artifacts import (
     KIND_AUDIO,
@@ -138,6 +139,7 @@ class Orchestrator:
         profiles=None,
         vault=None,
         live_view=None,
+        cost_guard=None,
     ):
         self.settings = settings
         self.store = store
@@ -145,6 +147,7 @@ class Orchestrator:
         self.memory = memory
         self.cache = cache
         self.budget = budget
+        self.cost_guard = cost_guard
         self.scheduler = scheduler
         self.profiles = profiles
         self.vault = vault
@@ -231,18 +234,36 @@ class Orchestrator:
         # habits. The user asked for exactly this: hand the task to the expert.
         expert = self.specialist_for_route(route)
         route.args.setdefault("specialist", expert.key)
+
+        # Every model call inside this task is charged to one ceiling, so a
+        # repair loop cannot quietly spend the whole day on a single request.
+        task = None
+        binding = None
+        if self.cost_guard is not None:
+            low, high = self.estimate_tokens(route)
+            task = self.cost_guard.start_task(route.intent.value, estimate=high)
+            binding = self.gateway.bind_task(task)
         try:
-            outcome = await handler(
-                user_id,
-                route,
-                progress=progress,
-                photo_path=photo_path,
-                voice_path=voice_path,
-                document_path=document_path,
-                chat_id=chat_id,
-            )
+            if binding is not None:
+                binding.__enter__()
+            try:
+                outcome = await handler(
+                    user_id,
+                    route,
+                    progress=progress,
+                    photo_path=photo_path,
+                    voice_path=voice_path,
+                    document_path=document_path,
+                    chat_id=chat_id,
+                )
+            finally:
+                if binding is not None:
+                    binding.__exit__(None, None, None)
         except (MissingSecretError, TaskCancelledError):
             raise
+        except BudgetExceeded as exc:
+            await self.store.log_error(route.intent.value, str(exc), user_id)
+            return Outcome(text=exc.user_message(), specialist=expert.key)
         except AgentError as exc:
             await self.store.log_error(route.intent.value, str(exc), user_id)
             raise
@@ -252,6 +273,8 @@ class Orchestrator:
             raise AgentError("Ada error tak terduga saat menjalankan tugas ini.") from exc
         if not outcome.specialist:
             outcome.specialist = expert.key
+        if task is not None and task.calls:
+            log.info("task spend intent=%s %s", route.intent.value, task.summary())
         return outcome
 
     def specialist_for_route(self, route: Route) -> Specialist:

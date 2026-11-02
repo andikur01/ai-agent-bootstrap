@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,32 @@ from app.llm.key_pool import looks_like_rate_limit
 from app.llm.tokens import count_message_tokens, trim_messages
 
 log = get_logger(__name__)
+
+# The task currently running, so every call made inside it is charged to the
+# same ceiling. A ContextVar keeps this correct per task instead of per process,
+# which matters because the bot handles users concurrently.
+_CURRENT_TASK: ContextVar[Any] = ContextVar("llm_current_task", default=None)
+
+
+@dataclass
+class _TaskBinding:
+    """A context manager that scopes LLM spending to one task."""
+
+    gateway: Any
+    task: Any
+    _token: Any = None
+
+    def __enter__(self):
+        self._token = _CURRENT_TASK.set(self.task)
+        return self.task
+
+    def __exit__(self, *exc):
+        _CURRENT_TASK.reset(self._token)
+        return False
+
+
+def _TASK_BINDING(gateway, task):
+    return _TaskBinding(gateway=gateway, task=task)
 
 # Logical tier -> per-provider model, tried in the user's configured order.
 TIER_MODELS: dict[str, dict[str, str]] = {
@@ -134,11 +161,12 @@ def _export_provider_env(provider: str, settings) -> None:
 
 
 class LLMGateway:
-    def __init__(self, settings, budget=None, key_pool=None):
+    def __init__(self, settings, budget=None, key_pool=None, cost_guard=None):
         self.settings = settings
         self.budget = budget
         self._litellm = None
         self.key_pool = key_pool
+        self.cost_guard = cost_guard
 
     # ------------------------------------------------------------------
     def _import(self):
@@ -154,6 +182,14 @@ class LLMGateway:
 
     def available(self) -> bool:
         return bool(self.settings.available_providers())
+
+    # ------------------------------------------------------------ task scope
+    def _current_task(self):
+        return _CURRENT_TASK.get()
+
+    def bind_task(self, task):
+        """Charge every call inside this block to ``task``."""
+        return _TASK_BINDING.set(task)
 
     def candidates(self, tier: str) -> list[tuple[str, str]]:
         models = TIER_MODELS.get(tier, TIER_MODELS["small"])
@@ -231,6 +267,21 @@ class LLMGateway:
         attempts: list[str] = []
         last_error: Exception | None = None
 
+        # Refuse before spending, not after. The day total comes from the store
+        # so a restart cannot reset the meter, and the per-task ceiling stops a
+        # repair loop from eating the whole day on one stubborn site.
+        task = self._current_task()
+        if self.cost_guard is not None:
+            day_used = 0
+            if self.budget is not None and user_id:
+                try:
+                    day_used = (await self.budget.usage(user_id))["total_tokens"]
+                except Exception as exc:  # noqa: BLE001 - never block on bookkeeping
+                    log.warning("usage lookup failed: %s", exc)
+            self.cost_guard.check(
+                wanted=prompt_tokens + output_cap, day_used=day_used, task=task
+            )
+
         for provider, model in self.candidates(tier):
             # Pick the active key from the pool and force it into the env var
             # LiteLLM reads. ``setdefault`` would keep a benched key alive after
@@ -270,6 +321,8 @@ class LLMGateway:
                     )
                     if self.budget and user_id:
                         await self.budget.record(user_id, model, p_tokens, c_tokens)
+                    if task is not None:
+                        task.record(p_tokens + c_tokens, note=f"{provider}/{tier}")
                     if self.key_pool:
                         self.key_pool.record_use(provider)
                     # "module" is a reserved LogRecord attribute; passing it in

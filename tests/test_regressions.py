@@ -809,7 +809,10 @@ def test_menu_explains_and_help_lists_the_commands():
 
     assert set(MENU_SECTIONS) == {"web", "automation", "system"}
     # The menu describes what the agent does, in plain language.
-    assert "Yang bisa aku kerjakan" in MENU_TEXT
+    assert "asisten pribadimu" in MENU_TEXT
+    # The two things the user asked to see explained here.
+    assert "/hidupkan" in MENU_TEXT
+    assert "/akun" in MENU_TEXT
     # Commands are documented, but behind /help rather than in the way.
     for command in ("/buat_web", "/buat_web_full", "/perbaiki_web"):
         assert command in HELP_TEXT
