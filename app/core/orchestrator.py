@@ -888,7 +888,12 @@ class Orchestrator:
             },
         )
         text = shipped.summary()
-        if shipped.deployment is None:
+        if shipped.deployment is not None:
+            # The link is the deliverable. It used to live only in the URL field,
+            # which the chat layer never rendered, so the user got "website jadi"
+            # with no address to open. Put it in the text where it is read.
+            text += f"\n\n🔗 Buka di sini:\n{shipped.deployment.url}"
+        else:
             text += f"\n\nBelum ada kredensial deploy, jadi aku kasih bundle lokal:\n`{shipped.bundle}`"
         screenshots = []
         if shipped.final_report:

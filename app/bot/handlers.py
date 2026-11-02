@@ -10,6 +10,7 @@ Responsibilities kept here (and nowhere else):
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from collections import defaultdict, deque
@@ -932,7 +933,24 @@ class TelegramBot:
         if prefs.get("live_feed", "on") == "off":
             return None
 
-        from app.services.live_feed import LiveFeed
+        from app.services.live_feed import LiveFeed, grab_screen
+
+        # Capture the real X display, not just the QA stills. This is the
+        # difference between "the site appeared at the end" and "I watched the
+        # browser open and load the page". The display comes from the live view
+        # if it is up, otherwise from DISPLAY.
+        display = ""
+        if self.live_view is not None:
+            display = getattr(getattr(self.live_view, "state", None), "display", "") or ""
+        display = display or os.environ.get("DISPLAY", "")
+        counter = {"n": 0}
+
+        def _grab() -> str | None:
+            if not display:
+                return None
+            counter["n"] += 1
+            out = self.settings.outputs_path / "live" / f"screen-{counter['n']:04d}.png"
+            return grab_screen(display, out)
 
         return LiveFeed(
             send_animation=lambda path, caption: message.reply_animation(
@@ -941,6 +959,7 @@ class TelegramBot:
             edit_animation=self._edit_feed_animation(message),
             outputs_dir=self.settings.outputs_path,
             interval=float(getattr(self.settings, "live_feed_interval", 6.0)),
+            screen_grab=_grab if display else None,
         )
 
     def _edit_feed_animation(self, message):
@@ -1386,11 +1405,37 @@ class TelegramBot:
 
         prefs = await self.store.get_prefs(user_id)
         current = "nyala 🔴" if prefs.get("live_feed", "on") != "off" else "mati 📴"
+
+        # Say whether the screen can actually start, not just whether the switch
+        # is on. The user was told "nyala" and then saw no live screen at all,
+        # because Xvfb/x11vnc/noVNC were missing from the server. A status that
+        # reports a preference instead of a capability is a lie in practice.
+        missing: list[str] = []
+        if self.live_view is not None:
+            try:
+                missing = await self.live_view.missing_tools()
+            except Exception as exc:  # noqa: BLE001 - status must never fail
+                log.debug("live view probe failed: %s", exc)
+
+        if missing:
+            status = (
+                "⚠️ *Belum bisa nyala di server ini.*\n"
+                f"Komponen kurang: `{', '.join(missing)}`\n"
+                "Pasang dulu di server:\n"
+                "`apt install xvfb x11vnc websockify novnc`\n"
+                "Sesudah itu aku bisa siarkan layar, dan `/live` bisa kamu pakai "
+                "untuk ikut klik."
+            )
+        else:
+            status = (
+                "✅ Komponen layar ada. Saat aku kerja, layarnya bergerak sendiri "
+                "di chat ini. Mau ikut klik langsung? `/live`."
+            )
+
         await update.message.reply_text(
             "*Siaran layar*\n\n"
-            f"Sekarang: {current}\n\n"
-            "Ini yang bikin kamu bisa *lihat* aku kerja di dalam chat - "
-            "layarnya bergerak sendiri, bukan cuma tulisan persen.\n\n"
+            f"Preferensi kamu: {current}\n"
+            f"{status}\n\n"
             "`/siaran on` - nyalakan\n"
             "`/siaran off` - matikan (hemat kuota)\n\n"
             "_Catatan jujur: Telegram tidak mengizinkan bot untuk siaran video "

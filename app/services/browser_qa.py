@@ -160,17 +160,26 @@ class BrowserQA:
         viewports: tuple[str, ...] = ("desktop", "mobile"),
         wait_ms: int = 1500,
         fill_forms: bool = False,
+        on_page=None,
     ) -> SiteReport:
         if not playwright_available():
             return SiteReport(url, error="Playwright belum terpasang (pip install playwright && playwright install chromium)")
         try:
-            return await self._run(url, viewports=viewports, wait_ms=wait_ms, fill_forms=fill_forms)
+            return await self._run(
+                url, viewports=viewports, wait_ms=wait_ms, fill_forms=fill_forms, on_page=on_page
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("browser QA failed: %s", exc)
             return SiteReport(url, error=str(exc)[:300])
 
     async def _run(
-        self, url: str, *, viewports: tuple[str, ...], wait_ms: int, fill_forms: bool
+        self,
+        url: str,
+        *,
+        viewports: tuple[str, ...],
+        wait_ms: int,
+        fill_forms: bool,
+        on_page=None,
     ) -> SiteReport:
         from playwright.async_api import async_playwright
 
@@ -279,6 +288,19 @@ class BrowserQA:
                         page_report.screenshot = str(shot)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("screenshot failed: %s", exc)
+
+                    # A second, viewport-sized frame for the live feed. The
+                    # full-page shot above is the right artefact to keep, but as
+                    # a feed frame it is a tall sliver - the user saw "cuma
+                    # titik". A viewport frame is what the screen actually looks
+                    # like, so that is what gets posted.
+                    if on_page is not None:
+                        feed_shot = self.outputs / "qa" / f"{_slug(url)}-{name}-live.png"
+                        try:
+                            await page.screenshot(path=str(feed_shot), full_page=False)
+                            await on_page(page_report, name, str(feed_shot))
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("live frame failed: %s", exc)
 
                     report.pages.append(page_report)
                     await context.close()
