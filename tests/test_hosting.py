@@ -124,3 +124,42 @@ async def test_second_host_cannot_bind_the_same_port(tmp_path):
         assert await other.start() is False
     finally:
         await host.stop()
+
+
+def test_login_page_counts_as_content():
+    """A short page full of controls is not an empty page.
+
+    A login/dashboard page has little prose but real interactive elements.
+    Judging it on text length alone flagged it as empty and sent the repair
+    loop chasing a defect that did not exist.
+    """
+    from app.services.browser_qa import PageReport
+
+    login = PageReport(
+        url="http://x",
+        viewport="desktop",
+        status=200,
+        text_length=44,
+        interactive_count=14,
+    )
+    assert login.ok
+    assert login.issues() == []
+
+    blank = PageReport(url="http://x", viewport="desktop", status=200, text_length=10)
+    assert not blank.ok
+    assert any("kosong" in issue for issue in blank.issues())
+
+
+def test_real_console_error_still_fails_even_with_controls():
+    from app.services.browser_qa import PageReport
+
+    page = PageReport(
+        url="http://x",
+        viewport="desktop",
+        status=200,
+        text_length=5000,
+        interactive_count=30,
+        console_errors=["Uncaught TypeError: x is not a function"],
+    )
+    assert not page.ok
+    assert any("console" in issue for issue in page.issues())

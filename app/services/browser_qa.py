@@ -37,17 +37,23 @@ class PageReport:
     status: int = 0
     title: str = ""
     text_length: int = 0
+    interactive_count: int = 0
     horizontal_overflow: bool = False
 
     @property
     def ok(self) -> bool:
+        # A login or dashboard page is legitimately short on prose but full of
+        # controls. Counting only text flagged those pages as "empty" and sent
+        # the repair loop chasing a problem that did not exist. Any real
+        # interactive element counts as content too.
+        has_content = self.text_length > 200 or self.interactive_count >= 3
         return (
             self.status in range(200, 400)
             and not self.console_errors
             and not self.page_errors
             and not self.failed_requests
             and not self.horizontal_overflow
-            and self.text_length > 200
+            and has_content
         )
 
     def issues(self) -> list[str]:
@@ -59,7 +65,7 @@ class PageReport:
         problems += [f"request gagal: {e}" for e in self.failed_requests[:5]]
         if self.horizontal_overflow:
             problems.append("layout overflow horizontal (tidak responsif)")
-        if self.text_length <= 200:
+        if self.text_length <= 200 and self.interactive_count < 3:
             problems.append("konten halaman terlalu sedikit / kosong")
         return problems
 
@@ -197,6 +203,17 @@ class BrowserQA:
                     try:
                         text = await page.inner_text("body")
                         page_report.text_length = len(text.strip())
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    try:
+                        page_report.interactive_count = int(
+                            await page.evaluate(
+                                "() => document.querySelectorAll("
+                                "'a[href], button, input, select, textarea').length"
+                            )
+                            or 0
+                        )
                     except Exception:  # noqa: BLE001
                         pass
 
