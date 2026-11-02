@@ -391,6 +391,16 @@ def _is_token_request(text: str) -> bool:
     )
 
 
+def _looks_like_credentials(text: str) -> bool:
+    """True when a free-text answer is probably a login, not a one-time code.
+
+    Only used to decide whether to delete the message afterwards. A code is a
+    single short token; a login has two or more parts and an "@" in one of them.
+    """
+    parts = (text or "").split()
+    return len(parts) >= 2 and any("@" in p for p in parts)
+
+
 def _args_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     return " ".join(context.args) if context.args else ""
 
@@ -442,6 +452,11 @@ class TelegramBot:
             timeout_seconds=int(getattr(settings, "handoff_timeout_seconds", 300))
         )
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
+        # Give the orchestrator a way to ask the user something mid-task. The
+        # browser agent uses it to request a login when it hits a wall with no
+        # saved account.
+        if hasattr(self.orch, "ask_user"):
+            self.orch.ask_user = self._ask_user
         self._running: dict[int, asyncio.Task] = {}
         # The chat a waiting task should answer into, set while a task runs.
         self._active_chat: dict[int, int] = {}
@@ -526,7 +541,14 @@ class TelegramBot:
         # who changes their mind is not trapped in the question.
         if self.handoff.pending(user.id) is not None and text and not text.startswith("/"):
             if self.handoff.answer(user.id, text):
-                await message.reply_text("👍 Kode diterima, aku lanjutkan sendiri.")
+                # A login answer carries a password. Delete it so it does not sit
+                # in the chat history, the same way /akun deletes its own message.
+                if _looks_like_credentials(text):
+                    try:
+                        await message.delete()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("could not delete the credential message: %s", exc)
+                await message.reply_text("👍 Diterima, aku lanjutkan sendiri.")
                 return
 
         # A pending confirmation intercepts the next message.

@@ -177,6 +177,9 @@ class Orchestrator:
             vault=vault,
             live_view=live_view,
         )
+        # Set by the bot at wiring time. The browser agent uses it to ask the
+        # user for a login mid-task; None means it simply cannot ask.
+        self.ask_user = None
 
     # ------------------------------------------------------------------ route
     async def classify(
@@ -701,6 +704,14 @@ class Orchestrator:
 
         if progress:
             await progress(5, f"Membuka {url}")
+
+        # Wire the mid-task question hook so a login wall asks the user for an
+        # account instead of giving up. Bound to this user and this chat.
+        if self.ask_user is not None:
+            async def _ask(question: str) -> str | None:
+                return await self.ask_user(user_id, question, chat_id=kwargs.get("chat_id", 0))
+
+            self.browser.ask = _ask
 
         run = await self.browser.run(url, task, user_id=user_id, progress=progress)
 
