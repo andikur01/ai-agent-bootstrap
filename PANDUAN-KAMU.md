@@ -325,6 +325,119 @@ kelewatan.**
 
 ---
 
+## KABAR BAGUS 5: soal 24 jam (ini yang kamu keluhkan)
+
+Kamu bilang: *"saya chat dari HP pagi, nggak dibalas, berarti belum aktif 24
+jam."* **Kamu benar.** Dan ada **DUA** sebab.
+
+### Sebab 1: bot-nya memang MATI
+
+Aku cek — prosesnya sudah nggak ada. Dijalankan pakai `nohup` tanpa penjaga,
+jadi begitu sesi berakhir, bot ikut mati. **Nggak ada yang nyalain lagi.**
+
+**Sudah diperbaiki.** Sekarang ada penjaga:
+
+```
+# Cara terbaik (VPS):
+sudo systemctl enable ai-agent && sudo systemctl start ai-agent
+
+# Atau kalau nggak ada systemd:
+bash deploy/run-forever.sh
+
+# Atau kalau pakai Docker:
+docker compose up -d
+```
+
+**Bukti nyata** — aku bunuh paksa botnya, lalu lihat:
+
+```
+PID bot sebelum dibunuh: 8289
+bot DIBUNUH paksa (simulasi crash)
+PID bot sekarang: 8431
+✅ HIDUP LAGI SENDIRI - PID baru 8431
+```
+
+Nyala sendiri **dalam 5 detik.** Aku tes 2x, tetap nyala.
+
+### Sebab 2: pesanmu DIBUANG (ini yang menyakitkan)
+
+Ini temuan yang bikin aku kaget. Kode lama start dengan
+`drop_pending_updates=True`. Artinya: **semua pesan yang kamu kirim waktu bot
+mati LANGSUNG DIHAPUS**, sebelum sempat dibaca.
+
+Kamu kirim dari HP → bot mati → **pesanmu hilang** → nggak ada balesan.
+
+**Bukti nyata.** Aku tanya server Telegram:
+
+```
+PENDING di server Telegram: 1 pesan menunggu
+terbaca oleh getUpdates: 1
+  id=547661328 text='/menu'
+```
+
+Ada **pesan sungguhan menunggu di antrean** — dan kode lama bakal
+menghapusnya. **Sekarang tidak lagi.** Kirim kapan saja, bot baca saat hidup.
+
+**Bonus:** tiap bot nyala, dia kirim `🟢 Bot hidup lagi`. Jadi kamu nggak perlu
+nebak lagi — **diam = mati, ada pesan = hidup.**
+
+### Soal "penuh" — ini jawabannya
+
+Kamu tanya: *"yang penuh apanya ya?"*
+
+**Bukan GitHub.** Repo kamu cuma **3.2 MB, 85 file.** Gambar & video **nggak
+masuk git sama sekali**. GitHub kamu aman.
+
+Yang penuh kalau dibiarkan: **disk server.**
+
+Tapi kamu bilang kuota Cloudflare habis 24% cuma beberapa chat. Itu karena
+**teks chat ke LLM**, bukan gambar. Wajar — tiap chat kirim konteks, dan model
+besar mahal.
+
+**Sekarang ada yang jaga otomatis** (cek tiap 6 jam):
+
+```
+/disk
+```
+
+Yang dihapus: gambar/video lama lewat 2 GB atau lewat 14 hari.
+Yang **TIDAK PERNAH** dihapus:
+- ✅ Login tersimpan — kalau dihapus kamu logout semua situs
+- ✅ Memory — kalau dihapus bot lupa semuanya
+- ✅ File 3 terbaru tiap jenis — kamu mungkin masih merujuk itu
+
+### Soal "pindah ke cloud lain otomatis kalau penuh"
+
+Jujur: **nggak bisa otomatis saat jalan.** Sebabnya bot pegang **koneksi
+Telegram** + **sesi browser**. Kalau 2 server nyala bareng, kamu dapat
+**balesan dobel** atau **nggak dibalas sama sekali** — Telegram cuma izinkan
+satu.
+
+**Tapi pindah bisa cepat:**
+
+```
+./deploy/backup.sh
+```
+
+Hasilnya 1 file kecil (17 KB) isi memory + login + preferensi. **Secret TIDAK
+ikut** — aku cek, 0 file `.env`/token di dalamnya. Di server baru tinggal
+extract + isi `.env` lagi.
+
+Ada file `NEEDED.txt` yang ingetin secret apa yang harus diisi — biar pindah
+nggak setengah jalan.
+
+**Intinya:** pindah itu 2 menit, bukan otomatis. Menurutku itu pertukaran yang
+benar — 2 menit kerja kamu, daripada risiko balesan dobel selamanya.
+
+### Kalau nambah key provider lain
+
+Kamu tanya: *"bisa pakai API key dari cloud lain?"* **Bisa.** Bot punya 7
+provider dengan rotasi otomatis. Kalau satu kena limit, langsung pindah ke
+berikutnya. Cek stok: `/stok`
+
+Bacaan lengkap: **`DEPLOY-24JAM.md`**
+
+---
 ## LANGKAH PERTAMAMU (2 menit)
 
 Kirim akun buanganmu:
