@@ -88,11 +88,21 @@ def _slug(text: str, limit: int = 40) -> str:
 
 
 class VideoService:
-    def __init__(self, settings, gateway=None, audio=None, *, outputs_dir: Path | None = None):
+    def __init__(
+        self,
+        settings,
+        gateway=None,
+        audio=None,
+        images=None,
+        *,
+        outputs_dir: Path | None = None,
+    ):
         self.settings = settings
         self.gateway = gateway
         self.audio = audio
+        self.images = images
         self.outputs = Path(outputs_dir or settings.outputs_path)
+        self._scene_backgrounds: dict[int, Path] = {}
         (self.outputs / "video").mkdir(parents=True, exist_ok=True)
 
     def _out(self, tag: str, name: str, ext: str = "mp4") -> Path:
@@ -112,6 +122,7 @@ class VideoService:
     ) -> VideoResult:
         spec = await self._plan(request, duration_hint=duration_hint)
         last: QualityVerdict | None = None
+        await self._fill_scene_backgrounds(spec, request, progress=progress)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if progress:
@@ -187,44 +198,69 @@ class VideoService:
         return _template_spec(request)
 
     # ------------------------------------------------------- slideshow path
-    async def _render_slideshow(self, spec: dict, out: Path, progress=None) -> None:
-        await asyncio.to_thread(self._slideshow_sync, spec, out)
+    async def _fill_scene_backgrounds(self, spec: dict, request: str, *, progress=None) -> None:
+        """Fetch one real image per scene, in parallel, before rendering starts.
 
-    def _slideshow_sync(self, spec: dict, out: Path) -> None:
+        Done up front so the render loop is not slowed by network waits, and so a
+        scene without a background is a known state rather than a race.
+        """
+        self._scene_backgrounds = {}
+        scenes = spec.get("scenes") or []
+        if self.images is None or not scenes:
+            return
+        if progress:
+            await progress(6, f"Bikin gambar latar untuk {len(scenes)} scene")
+
+        prompts = []
+        for index, scene in enumerate(scenes):
+            heading = str(scene.get("heading") or "").strip()
+            prompts.append(f"{heading}, {spec.get('title') or request}")
+
+        results = await asyncio.gather(
+            *(self._background_image(p) for p in prompts), return_exceptions=True
+        )
+        for index, result in enumerate(results):
+            if isinstance(result, Path):
+                self._scene_backgrounds[index] = result
+
+    async def _render_slideshow(self, spec: dict, out: Path, progress=None) -> None:
+        await asyncio.to_thread(self._slideshow_sync, spec, out, progress)
+
+    async def _background_image(self, prompt: str) -> Path | None:
+        """One real AI image for a scene background, or None if unavailable.
+
+        The slideshow used to draw a flat colour card per scene, which is why a
+        20-second 1280x720 video weighed 36 kb/s - there was nothing in the frame
+        to encode. A real photograph behind the text costs one image call and
+        makes the result watchable. Failure is not fatal: a missing background
+        falls back to the card, so the video still ships.
+        """
+        if self.images is None:
+            return None
+        try:
+            result = await self.images.generate(
+                f"{prompt}, cinematic, wide shot, high detail, no text",
+                size="1280x720",
+                style="photorealistic editorial photograph",
+            )
+            return Path(result.path)
+        except Exception as exc:  # noqa: BLE001 - a background is a nice-to-have
+            log.warning("scene background generation failed: %s", exc)
+            return None
+
+    def _slideshow_sync(self, spec: dict, out: Path, progress=None) -> None:
         from PIL import Image, ImageDraw, ImageFont
 
         width, height, fps = 1280, 720, 30
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             scene_files: list[Path] = []
-            for index, scene in enumerate(spec.get("scenes", [])):
-                bg, fg = TITLE_CARD_COLORS[index % len(TITLE_CARD_COLORS)]
-                image = Image.new("RGB", (width, height), bg)
-                draw = ImageDraw.Draw(image)
-                title_font = _load_font(46)
-                body_font = _load_font(30)
-                small_font = _load_font(20)
-
-                heading = str(scene.get("heading") or spec.get("title") or "")
-                draw.text((70, 70), heading[:60], font=title_font, fill=fg)
-                draw.line([(70, 140), (width - 70, 140)], fill=fg, width=2)
-
-                lines = scene.get("lines") or []
-                if scene.get("type") == "equation" and lines:
-                    draw.text((width // 2 - 60, height // 2 - 40), str(lines[0])[:60],
-                              font=_load_font(54), fill=fg)
-                else:
-                    y = 190
-                    for line in lines[:6]:
-                        wrapped = _wrap(str(line), 62)
-                        for part in wrapped[:2]:
-                            draw.text((90, y), "• " + part if not part.startswith("•") else part,
-                                      font=body_font, fill=fg)
-                            y += 44
-                        y += 6
-                draw.text((70, height - 50), f"{index + 1}/{len(spec.get('scenes', []))}  •  AI agent",
-                          font=small_font, fill=fg)
-
+            scenes = spec.get("scenes", [])
+            for index, scene in enumerate(scenes):
+                background = self._scene_backgrounds.get(index)
+                image = self._compose_scene(
+                    scene, spec, index, width, height, background
+                )
                 frame = tmp_path / f"frame{index:03d}.png"
                 image.save(frame)
                 scene_files.append(frame)
@@ -234,7 +270,7 @@ class VideoService:
 
             concat = tmp_path / "concat.txt"
             with concat.open("w") as handle:
-                for frame, scene in zip(scene_files, spec.get("scenes", [])):
+                for frame, scene in zip(scene_files, scenes):
                     duration = float(scene.get("duration") or 5.0)
                     duration = max(2.0, min(12.0, duration))
                     handle.write(f"file '{frame}'\nduration {duration:.2f}\n")
@@ -251,6 +287,60 @@ class VideoService:
                 run(run_ffmpeg(args, settings=self.settings))
             else:
                 _run_ffmpeg_blocking(args, self.settings)
+
+    def _compose_scene(self, scene, spec, index, width, height, background):
+        """Draw one scene: AI photo behind a scrim, with a readable text block."""
+        from PIL import Image, ImageDraw, ImageFont
+
+        bg, fg = TITLE_CARD_COLORS[index % len(TITLE_CARD_COLORS)]
+        if background is not None and Path(background).exists():
+            try:
+                image = Image.open(background).convert("RGB")
+                image = _cover_resize(image, width, height)
+                # Darken the left third so white text stays legible over any
+                # photo. Without this a bright sky makes the copy unreadable.
+                scrim = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                sdraw = ImageDraw.Draw(scrim)
+                for x in range(width):
+                    alpha = int(210 * max(0.0, 1 - (x / (width * 0.62))))
+                    sdraw.line([(x, 0), (x, height)], fill=(8, 12, 20, alpha))
+                image = Image.alpha_composite(image.convert("RGBA"), scrim).convert("RGB")
+                fg = (248, 250, 252)
+                draw = ImageDraw.Draw(image)
+                panel_left, panel_top = 56, 56
+            except Exception as exc:  # noqa: BLE001
+                log.warning("background compose failed, using flat card: %s", exc)
+                image = Image.new("RGB", (width, height), bg)
+                draw = ImageDraw.Draw(image)
+                panel_left, panel_top = 70, 70
+        else:
+            image = Image.new("RGB", (width, height), bg)
+            draw = ImageDraw.Draw(image)
+            panel_left, panel_top = 70, 70
+
+        title_font = _load_font(46)
+        body_font = _load_font(30)
+        small_font = _load_font(20)
+
+        heading = str(scene.get("heading") or spec.get("title") or "")
+        draw.text((panel_left, panel_top), heading[:60], font=title_font, fill=fg)
+        draw.line([(panel_left, panel_top + 70), (width - panel_left, panel_top + 70)], fill=fg, width=2)
+
+        lines = scene.get("lines") or []
+        if scene.get("type") == "equation" and lines:
+            draw.text((width // 2 - 60, height // 2 - 40), str(lines[0])[:60],
+                      font=_load_font(54), fill=fg)
+        else:
+            y = panel_top + 120
+            for line in lines[:6]:
+                for part in _wrap(str(line), 58)[:2]:
+                    draw.text((panel_left + 20, y), "• " + part if not part.startswith("•") else part,
+                              font=body_font, fill=fg)
+                    y += 44
+                y += 6
+        draw.text((panel_left, height - 50), f"{index + 1}/{len(spec.get('scenes', []))}  •  AI agent",
+                  font=small_font, fill=fg)
+        return image
 
     # ----------------------------------------------------------- manim path
     async def _render_manim(self, spec: dict, out: Path, progress=None) -> None:
@@ -611,6 +701,28 @@ def _load_font(size: int):
         except OSError:
             continue
     return ImageFont.load_default()
+
+
+def _cover_resize(image, width: int, height: int):
+    """Scale and centre-crop so the image fills the frame without distortion.
+
+    ``resize`` alone would squash a portrait photo into a 16:9 frame. Cropping
+    the overflow keeps faces and subjects in proportion.
+    """
+    from PIL import Image
+
+    target_ratio = width / height
+    src_ratio = image.width / image.height
+    if src_ratio > target_ratio:
+        new_height = height
+        new_width = int(height * src_ratio)
+    else:
+        new_width = width
+        new_height = int(width / src_ratio)
+    image = image.resize((new_width, new_height), Image.LANCZOS)
+    left = (new_width - width) // 2
+    top = (new_height - height) // 2
+    return image.crop((left, top, left + width, top + height))
 
 
 def _wrap(text: str, width: int) -> list[str]:

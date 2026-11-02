@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,6 +76,9 @@ def resolve_ffmpeg(settings=None) -> FFmpegPaths:
         import imageio_ffmpeg  # type: ignore
 
         binary = imageio_ffmpeg.get_ffmpeg_exe()
+        # The wheel ships one binary. It answers ffprobe's flags, so probing uses
+        # the same path - ``probe_media`` relies on that rather than declaring
+        # probing unavailable, which would fail every artifact as unverifiable.
         _resolved = FFmpegPaths(binary, binary, "imageio-ffmpeg")
         return _resolved
     except Exception as exc:  # noqa: BLE001
@@ -100,27 +104,89 @@ async def run_ffmpeg(args: list[str], *, timeout: int = 900, settings=None) -> s
 
 
 async def probe_media(path: str | Path, *, settings=None) -> dict:
-    """Return ffprobe JSON for *path*, or ``{}`` when probing fails."""
+    """Return ffprobe-style JSON for *path*, or ``{}`` when probing fails.
+
+    The ``imageio-ffmpeg`` wheel ships only an ``ffmpeg`` binary, no
+    ``ffprobe``. Falling back to the ffmpeg binary is fine - it understands the
+    ffprobe flags - but two details have to be right or the call silently
+    returns nothing, which is how every video once failed QA with "tidak bisa
+    diverifikasi":
+
+    * ``-v quiet`` suppresses the JSON on stdout as well as the banner, so the
+      output came back empty. ``-v error`` keeps the JSON.
+    * ``-show_format``/``-show_streams`` still work, and ``-of json`` is the
+      spelling ffmpeg accepts for ``-print_format json``.
+    """
     paths = resolve_ffmpeg(settings)
     binary = paths.ffprobe or paths.ffmpeg
     if not binary:
         return {}
     command = [
         binary,
-        "-v",
-        "quiet",
-        "-print_format",
-        "json",
+        "-v", "error",
+        "-print_format", "json",
         "-show_format",
         "-show_streams",
         str(path),
     ]
     try:
         stdout = await _run(command, timeout=60, collect_stdout=True)
-        return json.loads(stdout or "{}")
+        data = json.loads(stdout or "{}")
+        if isinstance(data, dict) and data.get("streams"):
+            return data
     except Exception as exc:  # noqa: BLE001
-        log.warning("ffprobe failed for %s: %s", path, exc)
+        log.debug("json probe unavailable (%s), falling back to stderr parse", exc)
+
+    # A build without ffprobe (or an ffmpeg that rejects the json flags) still
+    # prints everything needed to *verify* a file to stderr. Rather than failing
+    # every artifact as unverifiable, reconstruct the fields QA reads.
+    fallback = await _probe_via_stderr(binary, path)
+    if fallback:
+        return fallback
+    log.warning("could not probe %s with either method", path)
+    return {}
+
+
+async def _probe_via_stderr(binary: str, path: str | Path) -> dict:
+    """Build a minimal ffprobe-shaped dict from ``ffmpeg -i`` output."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            binary, "-hide_banner", "-i", str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("stderr probe failed: %s", exc)
         return {}
+
+    text = (stderr or b"").decode("utf-8", "ignore")
+    duration = 0.0
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if match:
+        hours, minutes, seconds = match.groups()
+        duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+    streams: list[dict] = []
+    for line in text.splitlines():
+        if "Stream #" not in line:
+            continue
+        kind = "audio" if "Audio:" in line else "video" if "Video:" in line else ""
+        if not kind:
+            continue
+        stream: dict = {"codec_type": kind}
+        size = re.search(r"(\d{2,5})x(\d{2,5})", line)
+        if size and kind == "video":
+            stream["width"] = int(size.group(1))
+            stream["height"] = int(size.group(2))
+        streams.append(stream)
+
+    if not streams:
+        return {}
+    return {
+        "streams": streams,
+        "format": {"duration": str(duration), "format_name": Path(str(path)).suffix.lstrip(".")},
+    }
 
 
 async def _run(command: list[str], *, timeout: int = 900, collect_stdout: bool = False) -> str:

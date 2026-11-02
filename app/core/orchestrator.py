@@ -156,7 +156,13 @@ class Orchestrator:
         outputs = settings.outputs_path
         self.images = ImageService(settings, outputs_dir=outputs)
         self.audio = AudioService(settings, outputs_dir=outputs)
-        self.videos = VideoService(settings, gateway=gateway, audio=self.audio, outputs_dir=outputs)
+        self.videos = VideoService(
+            settings,
+            gateway=gateway,
+            audio=self.audio,
+            images=self.images,
+            outputs_dir=outputs,
+        )
         self.search = SearchService(settings)
         self.links = LinkIngestService(settings, audio=self.audio, outputs_dir=outputs)
         self.web = WebBuilder(settings, gateway=gateway, outputs_dir=outputs)
