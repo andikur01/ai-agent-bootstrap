@@ -15,9 +15,17 @@ services:
       OUTPUTS_DIR: /app/outputs
       DATA_DIR: /app/data
       MEMORY_DIR: /app/data/memory
+      SANDBOX_TIMEOUT_SECONDS: "60"
+      SANDBOX_ALLOW_NETWORK: "false"
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
+      # OPSIONAL - bikin sandbox pakai Docker (isolasi kuat: kode tidak bisa
+      # baca .env bot). PERINGATAN: ini memberi container akses ke Docker host,
+      # yang setara akses root ke server. Nyalakan hanya kalau kamu paham
+      # risikonya. Tanpa ini, sandbox tetap jalan tapi isolasinya "lemah" dan
+      # bot akan bilang begitu terus terang.
+      # - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       chroma:
         condition: service_started

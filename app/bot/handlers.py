@@ -126,6 +126,7 @@ HELP_EXTRA = (
     "`/keys add` <provider> <key> - Kirim manual\n"
     "`/stok` - Stok token nyata (dihitung, bukan karangan)\n"
     "`/disk` - Cek penyimpanan, `/disk bersih` untuk bersihkan\n"
+    "`/tes` - Aku tes kodeku sendiri dulu sebelum bilang selesai\n"
     "Ketik: `ambil key di situsbaru.com` - aku cari di situs mana pun\n"
     "Ketik: `simpan <key>` - baru aku masukkan ke .env\n\n"
     "💬 *CHAT*\n\n"
@@ -1340,6 +1341,75 @@ class TelegramBot:
             f"`simpan semua di {host}`",
         ]
         await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_tes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Prove the bot can test its own work - live, on demand.
+
+        The user wanted to see this behaviour rather than be told about it, so
+        /tes runs a real script in the sandbox and reports what actually
+        happened: a working one, a crashing one, and one that tries to read the
+        bot's secrets. The last one matters most - it is the check that shows
+        the sandbox is real, not a claim.
+        """
+        sandbox = getattr(self.orch, "sandbox", None)
+        if sandbox is None:
+            await update.effective_message.reply_text("Sandbox tidak aktif.")
+            return
+
+        message = await update.effective_message.reply_text(
+            "🧪 Aku tes diriku sendiri, sebentar…"
+        )
+
+        lines = [f"🧪 *Hasil tes sendiri*\n\nIsolasi: {sandbox.describe()}"]
+        strength = sandbox.isolation_strength()
+        if strength == "kuat":
+            lines.append("Kekuatan isolasi: *kuat* — kode tidak bisa baca `.env` bot.")
+        else:
+            lines.append(
+                "Kekuatan isolasi: *lemah* — Docker tidak bisa diakses, jadi kode "
+                "jalan sebagai subprocess. Environment sudah dibersihkan, tapi "
+                "file di server masih bisa dibaca. Aku bilang ini terus terang."
+            )
+
+        with sandbox.workspace() as ws:
+            # 1. Kode yang benar harus lulus.
+            ws.write("benar.py", "print('aku jalan')\nprint(6 * 7)")
+            good = await ws.run("benar.py")
+            lines.append(
+                f"\n1️⃣ Kode benar → {'✅ LULUS' if good.ok else '❌ GAGAL'}\n"
+                f"`{good.stdout.strip().splitlines()[-1] if good.stdout.strip() else '-'}`"
+            )
+
+            # 2. Kode yang error harus terdeteksi gagal.
+            ws.write("salah.py", "raise ValueError('ini sengaja error')")
+            bad = await ws.run("salah.py")
+            lines.append(
+                f"\n2️⃣ Kode error → {'✅ terdeteksi gagal' if not bad.ok else '❌ SALAH: dianggap lulus'}"
+                f"\n`exit {bad.exit_code}`"
+            )
+
+            # 3. Percobaan mencuri secret. Ini bukti isolasi sungguhan.
+            ws.write(
+                "curi.py",
+                "import os\n"
+                "p='/workspace/project/ai-agent-bootstrap/.env'\n"
+                "print('BACA_ENV=' + str(os.path.exists(p)))\n"
+                "print('TOKEN=' + str(os.environ.get('TELEGRAM_BOT_TOKEN')))",
+            )
+            spy = await ws.run("curi.py")
+            leaked = "BACA_ENV=True" in spy.stdout or (
+                "TOKEN=" in spy.stdout and "TOKEN=None" not in spy.stdout
+            )
+            lines.append(
+                f"\n3️⃣ Coba curi `.env` → {'❌ BOCOR' if leaked else '✅ gagal (aman)'}\n"
+                f"`{spy.stdout.strip().replace(chr(10), ' | ') or spy.stderr.strip()[:80]}`"
+            )
+
+        lines.append(
+            "\nItu tes nyata, bukan klaim. Setiap tugas berat (website, kode, media) "
+            "aku jalankan lewat pemeriksaan yang sama sebelum aku bilang selesai."
+        )
+        await message.edit_text("\n".join(lines), parse_mode="Markdown")
 
     async def cmd_disk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show how full the outputs directory is, and clean it on request."""

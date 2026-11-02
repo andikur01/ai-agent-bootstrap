@@ -89,6 +89,7 @@ class Application:
         commands = [
             BotCommand("menu", "Menu semua fitur"),
             BotCommand("status", "Status bot & API"),
+            BotCommand("tes", "Tes diri sendiri: sandbox + isolasi"),
             BotCommand("status_model", "Model AI yang aktif"),
             BotCommand("pikir", "Analisis mendalam"),
             BotCommand("belajar", "Cari & simpan pengetahuan"),
@@ -177,6 +178,10 @@ async def build_app(settings: Settings | None = None, *, with_telegram: bool = T
 
     scheduler = SchedulerService(store, settings, notifier=notifier)
     orchestrator.scheduler = scheduler
+
+    from app.services.sandbox import build_sandbox
+
+    orchestrator.sandbox = build_sandbox(settings)
 
     from app.services.key_discovery import build_discovery
 
@@ -299,6 +304,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("keys", bot.cmd_keys))
     app.add_handler(CommandHandler("stok", bot.cmd_stok))
     app.add_handler(CommandHandler("disk", bot.cmd_disk))
+    app.add_handler(CommandHandler("tes", bot.cmd_tes))
     app.add_handler(CommandHandler("akun", bot.cmd_akun))
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))

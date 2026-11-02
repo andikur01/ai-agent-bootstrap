@@ -102,6 +102,19 @@ TOKEN_ESTIMATES = {
 }
 
 
+def estimate_tokens_for(intent) -> int:
+    """One number for a task, not a range.
+
+    TOKEN_ESTIMATES holds a (low, high) pair for the confirmation prompt, but
+    Outcome.tokens is formatted as a single figure. Using the pair directly
+    crashed the whole task with "unsupported format string passed to
+    tuple.__format__" - found in the live log, not in a test. The midpoint is
+    the honest single number to report after the fact.
+    """
+    low, high = TOKEN_ESTIMATES.get(intent, (300, 1200))
+    return (low + high) // 2
+
+
 @dataclass
 class Outcome:
     """What the orchestrator produced, ready for the Telegram layer to render."""
@@ -644,7 +657,7 @@ class Orchestrator:
             url=url,
             files=produced,
             milestone_screenshots=shots,
-            tokens=TOKEN_ESTIMATES.get(Intent.THINK, 3000),
+            tokens=estimate_tokens_for(Intent.THINK),
         )
 
     def _collect_download(self) -> tuple[list[str], str]:
@@ -692,7 +705,7 @@ class Orchestrator:
             files=[shipped.bundle] if shipped.bundle else [],
             milestone_screenshots=screenshots,
             skipped_qa=not self.qa and False,
-            tokens=TOKEN_ESTIMATES.get(Intent.WEB_STATIC, 9000),
+            tokens=estimate_tokens_for(Intent.WEB_STATIC),
         )
 
     # ------------------------------------------------------------------ n8n

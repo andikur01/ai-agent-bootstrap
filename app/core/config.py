@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     # says hello once per start.
     notify_on_start: bool = True
 
+    # ---------- Sandbox (agent menguji kodenya sendiri) ----------
+    # Kode yang dibuat agent dijalankan di sini dulu. Kalau Docker ada, kode
+    # berjalan di container terpisah tanpa akses ke .env bot; kalau tidak, ia
+    # jalan sebagai subprocess dengan environment yang sudah dibersihkan.
+    sandbox_timeout_seconds: int = 60
+    sandbox_allow_network: bool = False
+
     # ---------- Browser agent ----------
     # How many observe/act steps the agent may take on one page before it stops.
     browser_max_steps: int = 8
