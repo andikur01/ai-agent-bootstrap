@@ -43,6 +43,7 @@ from app.core.intent import Intent, Route
 from app.core.logging_setup import get_logger
 from app.core.orchestrator import HELP_TEXT, Orchestrator
 from app.core.progress import ConfirmationGate, ProgressReporter, parse_decision
+from app.services.api_catalog import build_catalog, wants_api_lookup
 from app.services.handoff import HandoffService
 from app.security.redact import redact
 
@@ -157,6 +158,8 @@ HELP_EXTRA = (
     "`/disk` - Cek penyimpanan, `/disk bersih` untuk bersihkan\n"
     "`/tes` - Aku tes kodeku sendiri dulu sebelum bilang selesai\n"
     "Ketik: `ambil key di situsbaru.com` - aku cari di situs mana pun\n"
+    "Ketik: `cari api cuaca` - aku cari di direktori public-apis (2.200+ layanan)\n"
+    "`/api` <kata kunci> - Direktori public-apis, tanpa pakai token\n"
     "Ketik: `simpan <key>` - baru aku masukkan ke .env\n\n"
     "💬 *CHAT*\n\n"
     "`/pikir` <topik> - Analisis 5 langkah\n"
@@ -248,103 +251,56 @@ def _provider_names_for_auto() -> list[str]:
 
 MENU_TEXT = (
     "🤖 *Aku asisten pribadimu - dan aku punya ahli di tiap bidang*\n\n"
-    "Kamu tidak perlu hafal perintah. Tulis saja maumu pakai bahasa biasa,\n"
-    "aku yang cari tahu maksudnya.\n\n"
+    "Tulis maumu pakai bahasa biasa, aku yang cari tahu maksudnya.\n\n"
 
-    "*⚡ Menghidupkan bot (mode bebas)*\n"
-    "`/hidupkan` - Aku berhenti nanya-nanya. Tugas berat langsung aku kerjakan,\n"
-    "aku putuskan sendiri caranya, lalu aku lapor hasilnya.\n"
-    "`/hidupkan off` - Balik tanya dulu sebelum tugas berat.\n"
-    "`/mode` - Lihat mode aktif + token terpakai hari ini.\n\n"
-    "Bedanya: tanpa mode bebas, tiap tugas berat aku minta izin dulu (ya/tidak)\n"
-    "supaya kamu tahu biayanya. Dengan mode bebas, aku jalan sendiri. Pengaman\n"
-    "biaya tetap jalan di dua-duanya, jadi token tidak kebablasan.\n\n"
+    "*🚀 CARA MENGAKTIFKAN AKU (3 langkah)*\n\n"
+    "*Langkah 1 - Hidupkan aku*\n"
+    "`/hidupkan` - aku berhenti minta izin tiap tugas, langsung kerjakan lalu\n"
+    "lapor hasilnya. Mau aku tanya dulu tiap tugas? `/hidupkan off`\n"
+    "Cek mode + token hari ini: `/mode`\n\n"
+    "*Langkah 2 - Kasih akses browser pakai akunmu*\n"
+    "Ini yang bikin aku bisa buka SEMUA situs, bukan cuma yang publik.\n"
+    "Ketik: `/akun <situs> <email> <password>`\n"
+    "Contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
+    "Sesudah itu cukup bilang: `buka canva dan buatkan desain`.\n"
+    "Password disimpan di serverku (izin file 0600), tidak di-commit, tidak\n"
+    "pernah aku tulis ulang di chat/log, dan pesanmu yang berisi password aku\n"
+    "hapus otomatis. Kalau situs minta kode verifikasi lewat email/HP, aku\n"
+    "berhenti dan minta kode itu ke kamu, lalu aku lanjutkan sendiri.\n"
+    "`/akun` lihat daftar (disensor) | `/akun hapus <situs>` hapus\n\n"
+    "*Langkah 3 (opsional) - Login sendiri tanpa passwordmu*\n"
+    "`/login <url>` - aku buka browsernya, KAMU yang login di situ, password\n"
+    "tidak pernah lewat aku. Sesinya aku simpan, berikutnya aku sudah masuk.\n\n"
 
     "*👥 Ahli di tiap bidang*\n"
-    "Aku bukan satu asisten serba bisa. Tiap jenis kerja aku serahkan ke ahlinya,\n"
-    "dan tiap ahli punya standar sendiri:\n"
-    "🌐 Ahli Web - situs & web app. Dilarang lorem ipsum, wajib dark mode,\n"
-    "   wajib lolos tes browser sebelum aku kirim ke kamu.\n"
-    "🎨 Ahli Gambar - bikin & edit gambar, cek hasil dulu sebelum dikirim.\n"
-    "🎬 Ahli Video - bikin & edit video, selalu cek durasi dan suara.\n"
-    "🎵 Ahli Audio - suara & musik, teks ke suara dan suara ke teks.\n"
-    "⚙️ Ahli Otomasi - workflow n8n yang benar-benar jalan.\n"
-    "📚 Ahli Riset - cari di internet, rangkum, simpan permanen.\n"
-    "🔗 Ahli Link - tonton/baca isi link lalu jawab pertanyaanmu.\n"
-    "🧠 Ahli Analisis - berpikir sistematis untuk masalah rumit.\n"
-    "💬 Asisten Ngobrol - ngobrol natural dan mengingat semuanya.\n\n"
+    "🌐 Ahli Web - dilarang lorem ipsum, wajib dark mode, wajib lolos tes browser\n"
+    "🎨 Ahli Gambar | 🎬 Ahli Video | 🎵 Ahli Audio - cek hasil dulu, baru kirim\n"
+    "⚙️ Ahli Otomasi (n8n) | 📚 Ahli Riset | 🔗 Ahli Link | 🧠 Ahli Analisis\n"
+    "💬 Asisten Ngobrol - ngobrol natural + ingatan penuh\n"
     "Mau paksa satu ahli? Bilang: `buatkan video, kasih ke ahlinya`\n\n"
 
-    "*🔐 Akses browser pakai akunmu (biar bisa buka SEMUA situs)*\n"
-    "Banyak situs butuh login. Kalau kamu kasih akunnya sekali, aku bisa masuk\n"
-    "sendiri dan kerjakan tugas di dalam akun itu - kamu tidak perlu buka browser.\n"
-    "Langkahnya:\n"
-    "1) Kirim: `/akun <situs> <email> <password>`\n"
-    "   contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
-    "2) Selesai. Setelah itu cukup bilang `buka canva dan buatkan desain`.\n"
-    "Password disimpan di serverku dengan izin file 0600 (hanya aku yang bisa\n"
-    "baca) - tidak di-commit, tidak pernah aku tulis ulang di chat atau di log,\n"
-    "dan pesanmu berisi password aku hapus otomatis.\n"
-    "Kalau situsnya minta kode dari email/HP, aku berhenti dan minta kode itu ke\n"
-    "kamu, lalu aku lanjutkan sendiri - tidak perlu mulai dari awal.\n"
-    "`/akun` - lihat daftar akun tersimpan (password disensor).\n"
-    "`/akun hapus <situs>` - hapus akun.\n\n"
+    "*🎥 Nonton aku kerja*\n"
+    "Layar kerjaku aku siarkan ke chat ini tiap beberapa detik - gambar bergerak,\n"
+    "bukan link. `/siaran` status | `/siaran off` matikan | `/live` ikut klik.\n\n"
 
-    "*📧 Kalau situs kirim email verifikasi*\n"
-    "Aku tidak bisa buka emailmu sendiri, jadi kalau situs minta kode, aku akan\n"
-    "berhenti dan minta kode itu ke kamu di chat. Kamu kirim kodenya, aku\n"
-    "lanjutkan sendiri dari titik itu - tidak perlu mulai dari awal.\n\n"
-
-    "*🎥 Nonton aku kerja (langsung di chat ini)*\n"
-    "Waktu aku mengerjakan tugas berat (bikin web, buka situs, bikin video),\n"
-    "layar kerjaku aku siarkan ke chat ini - gambar bergerak yang berubah terus,\n"
-    "bukan link yang harus kamu klik. Kamu lihat sendiri kursor dan halamannya\n"
-    "bergerak.\n"
-    "`/siaran` - cek status siaran\n"
-    "`/siaran off` - matikan (hemat kuota)\n"
-    "`/siaran on` - nyalakan lagi\n"
-    "`/live` - kalau kamu mau IKUT klik & ketik sendiri di layar itu\n"
-    "_Jujur ya: Telegram melarang bot siaran video langsung. Jadi ini feed\n"
-    "gambar bergerak yang aku perbarui tiap beberapa detik - paling dekat yang\n"
-    "bisa aku lakukan, dan hasilnya kamu lihat sendiri di chat._\n\n"
-
-    "*🌐 Website*\n"
-    "Situs statis (landing page, portofolio, toko) dan web fullstack dengan\n"
-    "login + database. Aku tulis kodenya, aku tes sendiri pakai browser, aku\n"
-    "screenshot, baru aku kirim. Kalau jelek aku perbaiki dulu.\n"
-    "Contoh: `buatkan web toko kopi`\n\n"
-
-    "*⚙️ Otomasi*\n"
-    "Workflow n8n siap impor, plus pengingat dan jadwal berulang.\n"
-    "Contoh: `buatkan workflow n8n untuk balas chat otomatis`\n\n"
-
-    "*🖼️ Gambar, video, suara*\n"
-    "Buat dan edit gambar, buat dan edit video, teks ke suara, suara ke teks.\n"
-    "Contoh: `buatkan poster anak-anak`\n\n"
-
-    "*🔗 Link*\n"
-    "Kirim link apa saja - YouTube, TikTok, IG, artikel. Aku ambil isinya,\n"
-    "aku tonton/transkrip, lalu jawab pertanyaanmu tentang isi link itu.\n"
-    "Kalau linknya diblokir, aku coba cara lain dulu. Kalau tetap gagal, aku\n"
-    "minta file-nya ke kamu.\n\n"
-
-    "*💬 Ngobrol & ingatan*\n"
-    "Aku ingat semua obrolan kita. \"lanjutkan yang tadi\", \"perbaiki yang\n"
-    "kemarin\" - aku tahu persis yang mana. Tanya \"apakah webnya sudah jadi?\"\n"
-    "kapan saja, aku jawab dari catatanku.\n\n"
-
-    "*📚 Belajar*\n"
-    "`belajar <topik>` - aku cari di internet, rangkum, simpan permanen.\n\n"
+    "*Yang bisa aku kerjakan*\n"
+    "🌐 Website statis & fullstack (login + database) - aku tes dulu, baru kirim\n"
+    "⚙️ Workflow n8n siap impor, pengingat & jadwal berulang\n"
+    "🖼️ Gambar, video, suara: buat & edit, teks ke suara, suara ke teks\n"
+    "🔗 Link apa saja (YouTube, TikTok, IG, artikel): aku tonton/transkrip,\n"
+    "   lalu jawab pertanyaanmu. Kalau diblokir, aku coba cara lain; kalau tetap\n"
+    "   gagal aku minta file-nya ke kamu.\n"
+    "📚 `belajar <topik>` - cari di internet, rangkum, simpan permanen\n"
+    "💬 Ngobrol natural, ingat semua obrolan. `lanjutkan yang tadi`,\n"
+    "   `perbaiki yang kemarin` - aku tahu persis yang mana.\n\n"
 
     "*💰 Token & biaya*\n"
-    "Aku hemat: jawaban serupa aku ambil dari cache, konteks aku potong, model\n"
-    "kecil untuk ngobrol, model besar hanya untuk tugas berat. Ada batas harian\n"
-    "dan batas per tugas, jadi tidak ada lagi kejadian 1 juta token sehari.\n"
-    "Tanya kapan saja: `berapa token terpakai?`\n\n"
+    "Jawaban serupa aku ambil dari cache, konteks aku potong, model kecil untuk\n"
+    "ngobrol. Ada batas harian + batas per tugas, jadi tidak ada lagi 1 juta\n"
+    "token sehari. Tanya kapan saja: `berapa token terpakai?`\n\n"
 
     "Ketik `/help` untuk daftar perintah lengkap. Tapi ingat: kamu tidak butuh itu."
 )
-
 # /help shows the full command list; the menu stays short.
 HELP_TEXT = HELP_TEXT + "\n\n" + HELP_EXTRA
 
@@ -458,6 +414,9 @@ class TelegramBot:
         self.live_view = live_view
         self.vault = vault or getattr(harvester, "vault", None)
         self.discovery = discovery
+        # The public-apis directory, so "cari api cuaca" is answered from a real
+        # list of services with no model call. Cached on disk, refreshed weekly.
+        self.catalog = build_catalog(settings)
         self.gate = ConfirmationGate(timeout_seconds=180)
         # Questions that need the human: verification codes, captchas. Kept
         # separate from the confirmation gate because the answer is free text,
@@ -604,6 +563,16 @@ class TelegramBot:
                 await self._keys_auto_all(update)
             else:
                 await self.cmd_keys_auto(update, harvest_target)
+            return
+
+        # "cari api cuaca gratis" is a directory question, not a task: answer it
+        # from the public-apis catalog with no model call at all. It runs after
+        # the harvest check on purpose, so "ambilkan key gemini" still goes to
+        # the harvester and only "where do I get an API for X" lands here.
+        wants_lookup, subject = wants_api_lookup(text)
+        if wants_lookup:
+            await self.orch.memory.remember_message(user.id, "user", text, {})
+            await self._answer_api_lookup(update, subject)
             return
 
         # Approval step for discovery: the agent found keys, the user says which
@@ -1769,6 +1738,70 @@ class TelegramBot:
         if saved:
             lines += ["", "Cek stok sekarang: `/stok`"]
         await message.reply_text("\n".join(lines) or "Tidak ada yang bisa disimpan.", parse_mode="Markdown")
+
+    async def _answer_api_lookup(self, update: Update, subject: str) -> None:
+        """Answer "where do I get an API for X" from the public-apis directory.
+
+        The catalog is a directory of services, not a bag of keys - a point
+        worth making in the reply, because the request was literally "take the
+        key from public-apis" and a user who expects keys will otherwise think
+        the feature is broken. What it gives is the part before the key: which
+        services exist, which need a credential, and where to sign up. From
+        there `/akun` + "ambilkan key" finishes the job.
+        """
+        message = update.effective_message
+        if message is None:
+            return
+        entries = await self.catalog.search(subject, needs_key=True, https_only=True, limit=8)
+        if not entries:
+            entries = await self.catalog.search(subject, https_only=True, limit=8)
+        if not entries:
+            total = await self.catalog.count()
+            await message.reply_text(
+                f"Tidak ketemu API untuk *{subject or 'itu'}* di direktori "
+                f"({total:,} layanan, {len(await self.catalog.categories())} kategori).\n\n"
+                "Coba kata kunci lain, atau sebut kategorinya: cuaca, berita, "
+                "keuangan, musik, olahraga, kesehatan.",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = [
+            f"🔎 *API untuk* _{subject}_ — dari direktori public-apis",
+            "",
+            f"Aku temukan {len(entries)} yang cocok:",
+            "",
+        ]
+        lines += [entry.render() for entry in entries]
+        lines += [
+            "",
+            "Catatan: direktori ini berisi *daftar layanan + alamat pendaftaran*, "
+            "bukan kuncinya. Kunci tetap kamu ambil di situsnya.",
+            "",
+            "Cara paling cepat - biar aku yang urus:",
+            f"1) `/akun <situs> <email> <password>` (sekali saja)",
+            f"2) bilang: `ambilkan key <nama provider>`",
+            "",
+            "Aku yang buka konsolnya, kamu tidak perlu klik-klik.",
+        ]
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_api(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """`/api <kata kunci>` - look up the directory on demand."""
+        self._authorise(update.effective_user.id)
+        args = list(context.args or [])
+        if not args:
+            cats = await self.catalog.categories()
+            total = await self.catalog.count()
+            await update.message.reply_text(
+                f"📚 *Direktori public-apis* — {total:,} layanan, {len(cats)} kategori\n\n"
+                "Pakai: `/api <kata kunci>`\n"
+                "Contoh: `/api cuaca`, `/api berita`, `/api crypto`\n\n"
+                "Kategori: " + ", ".join(cats[:30]),
+                parse_mode="Markdown",
+            )
+            return
+        await self._answer_api_lookup(update, " ".join(args))
 
     async def _discover_on_site(self, update: Update, url: str) -> None:
         """Go to a site the user names and report every key visible there.

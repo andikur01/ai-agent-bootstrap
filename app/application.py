@@ -365,6 +365,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("live", bot.cmd_live))
     app.add_handler(CommandHandler("siaran", bot.cmd_siaran))
     app.add_handler(CommandHandler("budget", bot.cmd_budget))
+    app.add_handler(CommandHandler("api", bot.cmd_api))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))

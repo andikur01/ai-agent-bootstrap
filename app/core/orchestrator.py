@@ -717,6 +717,14 @@ class Orchestrator:
         # than the built-in element-clicking loop. Fall back to that loop when
         # browser-use is not installed, so the feature still works.
         if browser_use_service.is_available(self.settings):
+            # Check the meter before spending, for the same reason the gateway
+            # does: browser-use talks to the provider directly, so it is the one
+            # path that can run up a bill the gateway never sees. Refusing here
+            # is what makes the daily budget actually hold.
+            allowed, note = await self._browser_budget_ok(user_id)
+            if not allowed:
+                return Outcome(text=note)
+
             result = await browser_use_service.run_browser_use(
                 self.settings,
                 url=url,
@@ -725,6 +733,9 @@ class Orchestrator:
                 max_steps=int(getattr(self.settings, "browser_use_max_steps", 8)),
                 profile_dir=self._browser_profile_dir(user_id),
             )
+            # Record it even on failure: a failed run still sent prompts, and an
+            # unrecorded spend is how a meter drifts away from the real bill.
+            await self._record_browser_tokens(user_id, result)
             if result.ok and result.answer.strip():
                 await self.memory.register_artifact(
                     user_id,
@@ -785,6 +796,49 @@ class Orchestrator:
             milestone_screenshots=shots,
             tokens=estimate_tokens_for(Intent.THINK),
         )
+
+    async def _browser_budget_ok(self, user_id: int) -> tuple[bool, str]:
+        """Would a browser task fit in today's budget? Says no before spending.
+
+        The gateway already refuses a call that cannot fit; browser-use bypasses
+        the gateway, so without this check that path is invisible to the meter
+        and can spend a whole day's budget unannounced.
+        """
+        budget = self.budget
+        if budget is None:
+            return True, ""
+        try:
+            remaining = await budget.remaining(user_id)
+        except Exception:  # noqa: BLE001 - never block work on bookkeeping
+            return True, ""
+        if budget.daily_budget <= 0:
+            return True, ""
+        # A browser task is a handful of model calls; this is the floor below
+        # which one cannot even start. Better to say so than to fail midway.
+        if remaining < 4000:
+            return False, (
+                "⛔ Sisa token harian tinggal "
+                f"{remaining:,}. Buka situs butuh beberapa panggilan model, jadi "
+                "aku tahan dulu biar tidak kebablasan.\n"
+                "Naikkan `DAILY_TOKEN_BUDGET` di `.env`, atau lanjut besok."
+            )
+        return True, ""
+
+    async def _record_browser_tokens(self, user_id: int, result) -> None:
+        """Bill the browser-use run to the same meter as everything else.
+
+        browser-use reports one total, not a prompt/completion split, so it is
+        booked as prompt tokens - the bulk of a browsing run is the page and
+        history being resent, which is input. Recording it at all is the point:
+        it was the only unrecorded spend in the system.
+        """
+        tokens = int(getattr(result, "tokens", 0) or 0)
+        if tokens <= 0 or self.budget is None or not user_id:
+            return
+        try:
+            await self.budget.record(user_id, "browser-use", tokens, 0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not record browser-use tokens: %s", exc)
 
     def _browser_profile_dir(self, user_id: int) -> Path | None:
         """The user's saved Chromium profile, so browser-use reuses their login.
