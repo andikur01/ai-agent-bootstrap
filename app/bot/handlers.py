@@ -10,12 +10,18 @@ Responsibilities kept here (and nowhere else):
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaAnimation,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
@@ -38,6 +44,8 @@ from app.core.intent import Intent, Route
 from app.core.logging_setup import get_logger
 from app.core.orchestrator import HELP_TEXT, Orchestrator
 from app.core.progress import ConfirmationGate, ProgressReporter, parse_decision
+from app.services.api_catalog import build_catalog, wants_api_lookup
+from app.services.handoff import HandoffService
 from app.security.redact import redact
 
 log = get_logger(__name__)
@@ -51,6 +59,16 @@ ASK_PREFIX = "ask:"
 _WATCHABLE_INTENTS = {
     Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR,
     Intent.VIDEO_CREATE, Intent.BROWSE,
+}
+# Intents where a progress bar is honest: the user is waiting on real work.
+# Chat, help and memory lookups answer in a second, so a bar there is theatre.
+_PROGRESS_INTENTS = {
+    Intent.IMAGE_CREATE, Intent.IMAGE_EDIT,
+    Intent.VIDEO_CREATE, Intent.VIDEO_EDIT,
+    Intent.AUDIO_CREATE, Intent.AUDIO_EDIT,
+    Intent.TTS, Intent.STT,
+    Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR,
+    Intent.N8N, Intent.LEARN, Intent.LINK_INGEST, Intent.THINK, Intent.BROWSE,
 }
 _ASK_TEXTS = {
     "web": "apakah webnya sudah jadi?",
@@ -98,6 +116,15 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
 # Full help stays available behind /help, but the menu shows only what is
 # actually in use. A wall of commands for features nobody calls is noise.
 HELP_EXTRA = (
+    "⚡ *MODE*\n\n"
+    "`/hidupkan` - Mode bebas: aku putuskan sendiri, tidak tanya tiap langkah\n"
+    "`/hidupkan off` - Balik tanya dulu sebelum tugas berat\n"
+    "`/mode` - Lihat mode aktif + token terpakai hari ini\n\n"
+    "🔐 *AKUN (buat login otomatis di browser)*\n\n"
+    "`/akun <situs> <email> <password>` - Simpan akun, aku yang login sendiri\n"
+    "`/akun` - Lihat daftar akun (password disensor)\n"
+    "`/akun hapus <situs>` - Hapus akun\n"
+    "Kalau situs kirim kode verifikasi ke emailmu, aku minta kodenya ke kamu.\n\n"
     "🌐 *WEB*\n\n"
     "`/buat_web` <deskripsi> - Situs statis profesional\n"
     "`/buat_web_full` <deskripsi> - Fullstack: login + database\n"
@@ -119,15 +146,21 @@ HELP_EXTRA = (
     "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
     "Kirim voice note - Langsung ditranskrip\n\n"
     "🖥️ *BROWSER & KEY*\n\n"
-    "(live view menyala otomatis di tugas panjang, tidak perlu perintah)\n"
+    "(siaran layar nyala otomatis di tugas panjang - kamu lihat aku kerja "
+    "di chat ini, layarnya bergerak sendiri)\n"
+    "`/siaran` - Nyalakan/matikan siaran layar di chat\n"
+    "`/live` - Link layar penuh, bisa kamu klik & ketik sendiri\n"
     "`/login` <url> - Login sekali ke situs provider\n"
     "`/keys` - Status key pool\n"
     "`/keys auto` <provider> - Ambil key otomatis\n"
     "`/keys add` <provider> <key> - Kirim manual\n"
     "`/stok` - Stok token nyata (dihitung, bukan karangan)\n"
+    "`/budget` - Lihat & ubah batas token harian\n"
     "`/disk` - Cek penyimpanan, `/disk bersih` untuk bersihkan\n"
     "`/tes` - Aku tes kodeku sendiri dulu sebelum bilang selesai\n"
     "Ketik: `ambil key di situsbaru.com` - aku cari di situs mana pun\n"
+    "Ketik: `cari api cuaca` - aku cari di direktori public-apis (2.200+ layanan)\n"
+    "`/api` <kata kunci> - Direktori public-apis, tanpa pakai token\n"
     "Ketik: `simpan <key>` - baru aku masukkan ke .env\n\n"
     "💬 *CHAT*\n\n"
     "`/pikir` <topik> - Analisis 5 langkah\n"
@@ -218,32 +251,57 @@ def _provider_names_for_auto() -> list[str]:
 
 
 MENU_TEXT = (
-    "🤖 *Yang bisa aku kerjakan*\n\n"
-    "Kamu tidak perlu hafal perintah. Tulis saja maumu pakai bahasa biasa,\n"
-    "aku yang cari tahu maksudnya. Perintah `/` cuma jalan pintas, bukan syarat.\n\n"
-    "*🌐 Website*\n"
-    "Situs statis (landing page, portofolio, toko) dan web fullstack dengan\n"
-    "login + database. Aku tulis kodenya, aku tes sendiri pakai browser, aku\n"
-    "screenshot, baru aku kirim. Kalau jelek aku perbaiki dulu, bukan dikirim\n"
-    "mentah. Contoh: `buatkan web toko kopi`\n\n"
-    "*⚙️ Otomasi*\n"
-    "Workflow n8n siap impor, plus pengingat dan jadwal berulang.\n"
-    "Contoh: `buatkan workflow n8n untuk balas chat otomatis`\n\n"
-    "*🖼️ Gambar & video*\n"
-    "Buat dan edit gambar, buat dan edit video, teks ke suara, suara ke teks.\n"
-    "Contoh: `buatkan poster anak-anak`\n\n"
-    "*🔗 Link*\n"
-    "Kirim link apa saja - YouTube, TikTok, IG, artikel. Aku ambil isinya,\n"
-    "aku tonton/transkrip, lalu jawab pertanyaanmu tentang isi link itu.\n\n"
-    "*💬 Ngobrol & ingatan*\n"
-    "Aku ingat semua obrolan kita. \"lanjutkan yang tadi\", \"perbaiki yang\n"
-    "kemarin\" - aku tahu persis yang mana. Tanya \"apakah webnya sudah jadi?\"\n"
-    "kapan saja, aku jawab dari catatanku.\n\n"
-    "*📚 Belajar*\n"
-    "`belajar <topik>` - aku cari di internet, rangkum, simpan permanen.\n\n"
+    "🤖 *Aku asisten pribadimu - dan aku punya ahli di tiap bidang*\n\n"
+    "Tulis maumu pakai bahasa biasa, aku yang cari tahu maksudnya.\n\n"
+
+    "*🚀 CARA MENGAKTIFKAN AKU (3 langkah)*\n\n"
+    "*Langkah 1 - Hidupkan aku*\n"
+    "`/hidupkan` - aku berhenti minta izin tiap tugas, langsung kerjakan lalu\n"
+    "lapor hasilnya. Mau aku tanya dulu tiap tugas? `/hidupkan off`\n"
+    "Cek mode + token hari ini: `/mode`\n\n"
+    "*Langkah 2 - Kasih akses browser pakai akunmu*\n"
+    "Ini yang bikin aku bisa buka SEMUA situs, bukan cuma yang publik.\n"
+    "Ketik: `/akun <situs> <email> <password>`\n"
+    "Contoh: `/akun canva.com emailku@gmail.com rahasia123`\n"
+    "Sesudah itu cukup bilang: `buka canva dan buatkan desain`.\n"
+    "Password disimpan di serverku (izin file 0600), tidak di-commit, tidak\n"
+    "pernah aku tulis ulang di chat/log, dan pesanmu yang berisi password aku\n"
+    "hapus otomatis. Kalau situs minta kode verifikasi lewat email/HP, aku\n"
+    "berhenti dan minta kode itu ke kamu, lalu aku lanjutkan sendiri.\n"
+    "`/akun` lihat daftar (disensor) | `/akun hapus <situs>` hapus\n\n"
+    "*Langkah 3 (opsional) - Login sendiri tanpa passwordmu*\n"
+    "`/login <url>` - aku buka browsernya, KAMU yang login di situ, password\n"
+    "tidak pernah lewat aku. Sesinya aku simpan, berikutnya aku sudah masuk.\n\n"
+
+    "*👥 Ahli di tiap bidang*\n"
+    "🌐 Ahli Web - dilarang lorem ipsum, wajib dark mode, wajib lolos tes browser\n"
+    "🎨 Ahli Gambar | 🎬 Ahli Video | 🎵 Ahli Audio - cek hasil dulu, baru kirim\n"
+    "⚙️ Ahli Otomasi (n8n) | 📚 Ahli Riset | 🔗 Ahli Link | 🧠 Ahli Analisis\n"
+    "💬 Asisten Ngobrol - ngobrol natural + ingatan penuh\n"
+    "Mau paksa satu ahli? Bilang: `buatkan video, kasih ke ahlinya`\n\n"
+
+    "*🎥 Nonton aku kerja*\n"
+    "Layar kerjaku aku siarkan ke chat ini tiap beberapa detik - gambar bergerak,\n"
+    "bukan link. `/siaran` status | `/siaran off` matikan | `/live` ikut klik.\n\n"
+
+    "*Yang bisa aku kerjakan*\n"
+    "🌐 Website statis & fullstack (login + database) - aku tes dulu, baru kirim\n"
+    "⚙️ Workflow n8n siap impor, pengingat & jadwal berulang\n"
+    "🖼️ Gambar, video, suara: buat & edit, teks ke suara, suara ke teks\n"
+    "🔗 Link apa saja (YouTube, TikTok, IG, artikel): aku tonton/transkrip,\n"
+    "   lalu jawab pertanyaanmu. Kalau diblokir, aku coba cara lain; kalau tetap\n"
+    "   gagal aku minta file-nya ke kamu.\n"
+    "📚 `belajar <topik>` - cari di internet, rangkum, simpan permanen\n"
+    "💬 Ngobrol natural, ingat semua obrolan. `lanjutkan yang tadi`,\n"
+    "   `perbaiki yang kemarin` - aku tahu persis yang mana.\n\n"
+
+    "*💰 Token & biaya*\n"
+    "Jawaban serupa aku ambil dari cache, konteks aku potong, model kecil untuk\n"
+    "ngobrol. Ada batas harian + batas per tugas, jadi tidak ada lagi 1 juta\n"
+    "token sehari. Tanya kapan saja: `berapa token terpakai?`\n\n"
+
     "Ketik `/help` untuk daftar perintah lengkap. Tapi ingat: kamu tidak butuh itu."
 )
-
 # /help shows the full command list; the menu stays short.
 HELP_TEXT = HELP_TEXT + "\n\n" + HELP_EXTRA
 
@@ -276,6 +334,42 @@ def menu_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(label, callback_data=f"{MENU_PREFIX}{ASK_PREFIX}{key}")])
     rows.append([InlineKeyboardButton("⬅️ Kembali ke menu", callback_data=f"{MENU_PREFIX}home")])
     return body, InlineKeyboardMarkup(rows)
+
+
+def _is_token_request(text: str) -> bool:
+    """Did the user actually ask what this cost?
+
+    Printing the figure on every reply made the conversation unreadable, so it
+    is shown only when asked for. The match is on the user's own words.
+    """
+    lowered = (text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in ("berapa token", "token terpakai", "pakai token", "biaya token", "harga token")
+    )
+
+
+def _specialist_label(key: str) -> str:
+    """Human label for the expert that handled a task, e.g. "🌐 Ahli Web"."""
+    try:
+        from app.core.specialists import by_key
+
+        expert = by_key(key)
+        if expert is not None:
+            return f"Dikerjakan {expert.label()}"
+    except Exception:  # noqa: BLE001 - a missing label is not worth a failure
+        pass
+    return ""
+
+
+def _looks_like_credentials(text: str) -> bool:
+    """True when a free-text answer is probably a login, not a one-time code.
+
+    Only used to decide whether to delete the message afterwards. A code is a
+    single short token; a login has two or more parts and an "@" in one of them.
+    """
+    parts = (text or "").split()
+    return len(parts) >= 2 and any("@" in p for p in parts)
 
 
 def _args_text(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -321,9 +415,25 @@ class TelegramBot:
         self.live_view = live_view
         self.vault = vault or getattr(harvester, "vault", None)
         self.discovery = discovery
+        # The public-apis directory, so "cari api cuaca" is answered from a real
+        # list of services with no model call. Cached on disk, refreshed weekly.
+        self.catalog = build_catalog(settings)
         self.gate = ConfirmationGate(timeout_seconds=180)
+        # Questions that need the human: verification codes, captchas. Kept
+        # separate from the confirmation gate because the answer is free text,
+        # not yes/no, and because a task is already running while we wait.
+        self.handoff = HandoffService(
+            timeout_seconds=int(getattr(settings, "handoff_timeout_seconds", 300))
+        )
         self.limiter = RateLimiter(settings.rate_limit_per_minute)
+        # Give the orchestrator a way to ask the user something mid-task. The
+        # browser agent uses it to request a login when it hits a wall with no
+        # saved account.
+        if hasattr(self.orch, "ask_user"):
+            self.orch.ask_user = self._ask_user
         self._running: dict[int, asyncio.Task] = {}
+        # The chat a waiting task should answer into, set while a task runs.
+        self._active_chat: dict[int, int] = {}
 
     @property
     def gateway(self):
@@ -388,7 +498,32 @@ class TelegramBot:
 
         await self.store.upsert_user(user.id, user.username or "", user.first_name or "")
 
+        # Warn once if there is no daily ceiling. The user learned about the
+        # million-token day from the bill, not from the bot, because this
+        # warning existed but was never called.
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is not None:
+            warning = guard.unlimited_warning()
+            if warning:
+                await message.reply_text(warning, parse_mode="Markdown")
+
         text = (message.text or message.caption or "").strip()
+
+        # A task waiting on the user - a one-time code, a captcha confirmation -
+        # gets the next message before anything else sees it. Only a real
+        # answer is consumed: a fresh command still routes normally, so a user
+        # who changes their mind is not trapped in the question.
+        if self.handoff.pending(user.id) is not None and text and not text.startswith("/"):
+            if self.handoff.answer(user.id, text):
+                # A login answer carries a password. Delete it so it does not sit
+                # in the chat history, the same way /akun deletes its own message.
+                if _looks_like_credentials(text):
+                    try:
+                        await message.delete()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("could not delete the credential message: %s", exc)
+                await message.reply_text("👍 Diterima, aku lanjutkan sendiri.")
+                return
 
         # A pending confirmation intercepts the next message.
         pending = self.gate.get(user.id)
@@ -429,6 +564,16 @@ class TelegramBot:
                 await self._keys_auto_all(update)
             else:
                 await self.cmd_keys_auto(update, harvest_target)
+            return
+
+        # "cari api cuaca gratis" is a directory question, not a task: answer it
+        # from the public-apis catalog with no model call at all. It runs after
+        # the harvest check on purpose, so "ambilkan key gemini" still goes to
+        # the harvester and only "where do I get an API for X" lands here.
+        wants_lookup, subject = wants_api_lookup(text)
+        if wants_lookup:
+            await self.orch.memory.remember_message(user.id, "user", text, {})
+            await self._answer_api_lookup(update, subject)
             return
 
         # Approval step for discovery: the agent found keys, the user says which
@@ -508,10 +653,50 @@ class TelegramBot:
         )
 
         if route.needs_confirm and not route.args.get("confirmed"):
-            await self._ask_confirmation(message, user.id, route)
-            return
+            # Free mode is the user's own switch ("hidupkan bot"): stop asking
+            # permission for every step and start making the calls. The cost
+            # guard still caps spending, so "act on your own" never means
+            # "spend without limit".
+            if await self._free_mode(user.id):
+                route.args["confirmed"] = True
+            else:
+                await self._ask_confirmation(message, user.id, route)
+                return
 
         await self._run_task(update, context, route)
+
+    async def _free_mode(self, user_id: int) -> bool:
+        try:
+            prefs = await self.store.get_prefs(user_id)
+        except Exception:  # noqa: BLE001 - never block a task on prefs
+            return False
+        return bool(prefs.get("free_mode"))
+
+    async def _ask_user(self, user_id: int, question: str, *, chat_id: int | None = None) -> str | None:
+        """Ask the user something only they can answer, and wait for it.
+
+        Used mid-task, so the question goes to the chat the task is running in.
+        Returns None on timeout, which callers must treat as "cannot continue"
+        rather than as an empty answer.
+        """
+        chat = chat_id or self._active_chat.get(user_id)
+        pending = self.handoff.ask_nowait(user_id, question)
+        if chat is not None:
+            try:
+                await self.bot_send(chat, question)
+            except Exception as exc:  # noqa: BLE001 - the wait below is pointless
+                log.warning("could not send handoff question: %s", exc)
+                self.handoff.cancel(user_id)
+                return None
+        return await self.handoff.wait(pending)
+
+    async def bot_send(self, chat_id: int, text: str) -> None:
+        """Send a message outside the update flow, e.g. from a running task."""
+        app = getattr(self, "_app", None)
+        if app is None:
+            log.info("handoff question (no app): %s", text[:120])
+            return
+        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
     # ---------------------------------------------------------- confirmation
     async def _ask_confirmation(self, message, user_id: int, route: Route) -> None:
@@ -600,6 +785,9 @@ class TelegramBot:
         if message is None or user is None:
             return
         user_id = user.id
+        # The user's own words for this turn, used below to decide whether they
+        # actually asked about token usage.
+        text = str(route.args.get("text") or "")
 
         # heavy quota
         if route.intent in {Intent.WEB_STATIC, Intent.WEB_FULLSTACK, Intent.WEB_REPAIR, Intent.VIDEO_CREATE}:
@@ -631,29 +819,55 @@ class TelegramBot:
             except Exception as exc:  # noqa: BLE001 - never block the task
                 log.debug("live view not started for task: %s", exc)
 
+        # A progress bar belongs on work with real waiting in it. Showing one for
+        # "hallo brp" put a progress bar and a "Mulai..." line above every
+        # conversational reply, which is what made the chat feel like a machine.
+        # Light intents just show the typing indicator.
+        show_progress = route.intent in _PROGRESS_INTENTS
         reporter = ProgressReporter(
             lambda text: message.reply_text(text, parse_mode="Markdown"),
             title=f"{route.intent.value}",
             send_photo=lambda path, caption: message.reply_photo(
                 Path(path).open("rb"), caption=redact(caption)[:1024]
             ),
-        )
+        ) if show_progress else None
+
+        # Live feed: the user asked to *watch* the work, not read a percentage.
+        # A Telegram bot cannot stream video, so the frames the agent already
+        # takes are posted as a moving tile that updates itself. Only for the
+        # intents that produce screenshots - a feed for a chat reply is noise.
+        feed = None
+        if show_progress and route.intent in _WATCHABLE_INTENTS:
+            feed = await self._make_live_feed(message, user_id)
 
         async def progress(percent: int, note: str, *, screenshot: str = "") -> None:
-            await reporter.update(percent, note, screenshot=screenshot)
+            if feed is not None and screenshot:
+                feed.push(screenshot)
+            if reporter is not None:
+                await reporter.update(percent, note, screenshot=screenshot)
 
         try:
             async with TypingIndicator(message.chat):
                 await progress(5, "Mulai...")
-                outcome = await self.orch.execute(
-                    user_id,
-                    route,
-                    progress=progress,
-                    photo_path=str(route.args.get("photo_path") or ""),
-                    voice_path=str(route.args.get("voice_path") or ""),
-                    document_path=str(route.args.get("document_path") or ""),
-                    chat_id=message.chat_id,
-                )
+                # Remember where to reach this user while the task runs, so a
+                # mid-task question (a verification code) lands in this chat.
+                self._active_chat[user_id] = message.chat_id
+                if feed is not None:
+                    await feed.start()
+                try:
+                    outcome = await self.orch.execute(
+                        user_id,
+                        route,
+                        progress=progress,
+                        photo_path=str(route.args.get("photo_path") or ""),
+                        voice_path=str(route.args.get("voice_path") or ""),
+                        document_path=str(route.args.get("document_path") or ""),
+                        chat_id=message.chat_id,
+                    )
+                finally:
+                    self._active_chat.pop(user_id, None)
+                    if feed is not None:
+                        await feed.stop()
             await self.store.update_task(task_id, "done", outcome.text[:500])
 
             # Milestone screenshots first: evidence before the summary.
@@ -663,11 +877,19 @@ class TelegramBot:
             body = outcome.text
             if outcome.cached:
                 body += "\n\n_(dari cache, hemat token)_"
-            # Report what the task actually cost. A guessed estimate before the
-            # run is a promise; the real number afterwards is a fact, and the
-            # user asked for the fact.
-            if outcome.tokens:
+            # The token figure used to be printed under every reply, and the
+            # user found it noisy: "bro chat bisa kok di tampilan habis berapa
+            # token sih". It is also an estimate, not a measurement, so putting
+            # it on every message reads as precision that is not there. It now
+            # lives behind /stok and /status, where someone asking for it will
+            # look, and stays off the conversation.
+            if outcome.tokens and _is_token_request(text):
                 body += f"\n\n_Token terpakai: {outcome.tokens:,}_"
+            # Say who did the work. The user asked for tasks to be handed to the
+            # right expert; without a name on the reply there is no way to tell
+            # whether that actually happened. Only on real work, not on chat.
+            if outcome.specialist and route.intent not in {Intent.CHAT, Intent.HELP}:
+                body += f"\n\n_{_specialist_label(outcome.specialist)}_"
             await send_text(message, body)
 
             for path in outcome.files or []:
@@ -697,6 +919,72 @@ class TelegramBot:
             await self.store.log_error(route.intent.value, f"{type(exc).__name__}: {exc}", user_id)
             log.exception("task crashed intent=%s", route.intent.value)
             await send_text(message, "❌ Ada error tak terduga. Sudah aku catat di log.")
+
+    async def _make_live_feed(self, message, user_id: int):
+        """Build a screen feed for this chat, or None when it is switched off.
+
+        The feed is on by default because the user asked to watch the work, but
+        it costs bandwidth and a message per few seconds, so `/siaran off` has
+        to be able to turn it off without touching the config.
+        """
+        if not getattr(self.settings, "live_feed_enabled", True):
+            return None
+        prefs = await self.store.get_prefs(user_id)
+        if prefs.get("live_feed", "on") == "off":
+            return None
+
+        from app.services.live_feed import LiveFeed, grab_screen
+
+        # Capture the real X display, not just the QA stills. This is the
+        # difference between "the site appeared at the end" and "I watched the
+        # browser open and load the page". The display comes from the live view
+        # if it is up, otherwise from DISPLAY.
+        display = ""
+        if self.live_view is not None:
+            display = getattr(getattr(self.live_view, "state", None), "display", "") or ""
+        display = display or os.environ.get("DISPLAY", "")
+        counter = {"n": 0}
+
+        def _grab() -> str | None:
+            if not display:
+                return None
+            counter["n"] += 1
+            out = self.settings.outputs_path / "live" / f"screen-{counter['n']:04d}.png"
+            return grab_screen(display, out)
+
+        return LiveFeed(
+            send_animation=lambda path, caption: message.reply_animation(
+                Path(path).open("rb"), caption=caption
+            ),
+            edit_animation=self._edit_feed_animation(message),
+            outputs_dir=self.settings.outputs_path,
+            interval=float(getattr(self.settings, "live_feed_interval", 6.0)),
+            screen_grab=_grab if display else None,
+        )
+
+    def _edit_feed_animation(self, message):
+        """Update the existing feed message in place, if the bot can.
+
+        Telegram cannot edit media on an arbitrary message, so this needs a real
+        ``Bot``. When there is none (tests, or a plain Message double) the feed
+        simply posts a new tile instead of failing.
+        """
+        bot = getattr(message, "get_bot", None)
+        if bot is None:
+            return None
+        try:
+            bot = message.get_bot()
+        except Exception:  # noqa: BLE001 - a fake message has no bot
+            return None
+
+        async def _edit(message_id, path, caption):
+            await bot.edit_message_media(
+                chat_id=message.chat_id,
+                message_id=message_id,
+                media=InputMediaAnimation(Path(path).open("rb"), caption=caption),
+            )
+
+        return _edit
 
     def _capacity_hint(self) -> str:
         """Tell the user where to get a key when every provider is exhausted.
@@ -755,6 +1043,158 @@ class TelegramBot:
         invited the opposite behaviour, so the text stands alone.
         """
         await send_text(update.effective_message, MENU_TEXT)
+
+    async def cmd_hidupkan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Turn the bot loose: decide on its own instead of asking each time.
+
+        The user asked for this in these words - "cara agar menghidupkan bot",
+        "kalau berhasil begini, izinkan dia masuk browser" - so the command is
+        named after their phrasing. It flips one preference. The cost guard
+        still applies, because acting freely and spending without limit are not
+        the same thing.
+        """
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        try:
+            self._authorise(user.id)
+        except UnauthorizedUserError as exc:
+            await message.reply_text(exc.user_message)
+            return
+
+        arg = (context.args[0].lower() if context.args else "on")
+        if arg in {"off", "mati", "stop", "nonaktif"}:
+            await self.store.set_pref(user.id, "free_mode", False)
+            await message.reply_text(
+                "😴 Mode bebas dimatikan.\n"
+                "Sekarang aku tanya dulu sebelum tugas berat."
+            )
+            return
+
+        await self.store.set_pref(user.id, "free_mode", True)
+        await message.reply_text(
+            "⚡ *Mode bebas aktif.*\n\n"
+            "Mulai sekarang aku tidak tanya-tanya lagi untuk tugas berat - aku "
+            "putuskan sendiri, kerjakan, lalu lapor hasilnya.\n\n"
+            "Aku tetap minta ke kamu hanya untuk hal yang cuma kamu yang bisa: "
+            "login, izin, atau kode verifikasi yang dikirim ke emailmu.\n\n"
+            "Pengaman biaya tetap jalan, jadi token tidak kebablasan.\n"
+            "Matikan kapan saja: `/hidupkan off`",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the current mode and the daily token situation."""
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        try:
+            self._authorise(user.id)
+        except UnauthorizedUserError as exc:
+            await message.reply_text(exc.user_message)
+            return
+
+        free = await self._free_mode(user.id)
+        lines = [
+            "⚙️ *Mode sekarang*",
+            f"Bebas bertindak: {'⚡ aktif' if free else '😴 mati'}",
+        ]
+        budget = getattr(self.orch, "budget", None)
+        if budget is not None:
+            lines.append("")
+            lines.append(await budget.summary(user.id))
+
+        # Show the spending ceiling here, because this is the command the menu
+        # points at for cost. Reporting the total after the fact is an autopsy;
+        # the user needs to see the limit before it is hit.
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is not None:
+            lines.append("")
+            if guard.daily_budget > 0:
+                lines.append(
+                    f"💰 Batas harian: {guard.daily_budget:,} token\n"
+                    f"   Batas per tugas: {guard.task_limit():,} token\n"
+                    f"   Batas per panggilan: {guard.max_call:,} token"
+                )
+            else:
+                lines.append(
+                    "⚠️ Batas harian: *tanpa batas* (`DAILY_TOKEN_BUDGET=0`).\n"
+                    "   Token bisa kebablasan seperti kemarin. Aku tetap batasi "
+                    f"{guard.max_call:,} token per panggilan.\n"
+                    "   Isi `DAILY_TOKEN_BUDGET=150000` di `.env` biar aman."
+                )
+        lines.append("")
+        lines.append("Ubah: `/hidupkan` atau `/hidupkan off`")
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show and change the daily token ceiling from the chat.
+
+        The user hit a million tokens because the ceiling defaulted to unlimited
+        and could only be changed by editing `.env` on the server. Both of those
+        are fixed here: the default is bounded, and `/budget <angka>` sets it
+        live, without a restart.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+        guard = getattr(self.orch, "cost_guard", None)
+        if guard is None:
+            await update.message.reply_text("Pengaman biaya belum aktif di server ini.")
+            return
+
+        args = list(context.args or [])
+        if args:
+            raw = args[0].lower().replace(".", "").replace(",", "").replace("_", "")
+            if raw in ("off", "unlimited", "tanpa", "0"):
+                guard.daily_budget = 0
+                from app.llm.credentials import set_env_var
+
+                set_env_var(self.settings.env_file, "DAILY_TOKEN_BUDGET", "0")
+                await update.message.reply_text(
+                    "⚠️ Batas harian dimatikan (`DAILY_TOKEN_BUDGET=0`).\n"
+                    "Token sekarang bisa kebablasan. Nyalakan lagi: `/budget 150000`",
+                    parse_mode="Markdown",
+                )
+                return
+            if not raw.isdigit():
+                await update.message.reply_text(
+                    "Formatnya angka, contoh: `/budget 150000`", parse_mode="Markdown"
+                )
+                return
+            value = int(raw)
+            if value < 5000:
+                await update.message.reply_text(
+                    "Terlalu kecil - aku akan menyerah di tengah tugas. Minimal 5000.",
+                )
+                return
+            guard.daily_budget = value
+            from app.llm.credentials import set_env_var
+
+            set_env_var(self.settings.env_file, "DAILY_TOKEN_BUDGET", str(value))
+            await update.message.reply_text(
+                f"✅ Batas harian jadi *{value:,} token*.\n"
+                f"Batas per tugas: {guard.task_limit():,} token\n"
+                "Langsung berlaku, tanpa restart.",
+                parse_mode="Markdown",
+            )
+            return
+
+        if guard.daily_budget > 0:
+            head = f"💰 Batas harian: *{guard.daily_budget:,} token*"
+            note = ""
+        else:
+            head = "⚠️ Batas harian: *tanpa batas*"
+            note = "\nIni yang bikin token kamu ~1 juta kemarin. Sebaiknya diisi."
+        await update.message.reply_text(
+            f"{head}\n"
+            f"Batas per tugas: {guard.task_limit():,} token\n"
+            f"Batas per panggilan: {guard.max_call:,} token{note}\n\n"
+            "Ubah: `/budget 150000`\n"
+            "Matikan: `/budget off`",
+            parse_mode="Markdown",
+        )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         providers = self.settings.available_providers()
@@ -929,6 +1369,79 @@ class TelegramBot:
             "kamu ambil alih di layar itu.\n\n"
             "Catatan: siapa pun yang punya link + password ini bisa mengendalikan "
             "browser. Jangan dibagikan.",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_siaran(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Turn the in-chat screen feed on or off.
+
+        The feed posts a moving picture of the agent's screen while it works.
+        It is on by default because the user asked to watch the work happen, but
+        on a metered phone connection a GIF every few seconds is real money, so
+        it has to be switchable from the chat.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+
+        args = [a.lower() for a in (context.args or [])]
+        if args and args[0] in ("off", "mati", "stop"):
+            await self.store.set_pref(user_id, "live_feed", "off")
+            await update.message.reply_text(
+                "📴 Siaran layar dimatikan.\n\n"
+                "Aku tetap kirim progress persen dan screenshot penting saja.\n"
+                "Nyalakan lagi: `/siaran on`",
+                parse_mode="Markdown",
+            )
+            return
+        if args and args[0] in ("on", "hidup", "nyala"):
+            await self.store.set_pref(user_id, "live_feed", "on")
+            await update.message.reply_text(
+                "🔴 Siaran layar dinyalakan.\n\n"
+                "Mulai sekarang, saat aku kerja kamu lihat layarnya bergerak "
+                "sendiri di chat ini - bukan link.",
+                parse_mode="Markdown",
+            )
+            return
+
+        prefs = await self.store.get_prefs(user_id)
+        current = "nyala 🔴" if prefs.get("live_feed", "on") != "off" else "mati 📴"
+
+        # Say whether the screen can actually start, not just whether the switch
+        # is on. The user was told "nyala" and then saw no live screen at all,
+        # because Xvfb/x11vnc/noVNC were missing from the server. A status that
+        # reports a preference instead of a capability is a lie in practice.
+        missing: list[str] = []
+        if self.live_view is not None:
+            try:
+                missing = await self.live_view.missing_tools()
+            except Exception as exc:  # noqa: BLE001 - status must never fail
+                log.debug("live view probe failed: %s", exc)
+
+        if missing:
+            status = (
+                "⚠️ *Belum bisa nyala di server ini.*\n"
+                f"Komponen kurang: `{', '.join(missing)}`\n"
+                "Pasang dulu di server:\n"
+                "`apt install xvfb x11vnc websockify novnc`\n"
+                "Sesudah itu aku bisa siarkan layar, dan `/live` bisa kamu pakai "
+                "untuk ikut klik."
+            )
+        else:
+            status = (
+                "✅ Komponen layar ada. Saat aku kerja, layarnya bergerak sendiri "
+                "di chat ini. Mau ikut klik langsung? `/live`."
+            )
+
+        await update.message.reply_text(
+            "*Siaran layar*\n\n"
+            f"Preferensi kamu: {current}\n"
+            f"{status}\n\n"
+            "`/siaran on` - nyalakan\n"
+            "`/siaran off` - matikan (hemat kuota)\n\n"
+            "_Catatan jujur: Telegram tidak mengizinkan bot untuk siaran video "
+            "langsung. Jadi ini feed gambar bergerak yang aku perbarui terus, "
+            "yang paling dekat dengan 'nonton langsung'. Kalau mau kontrol "
+            "penuh (ketik captcha sendiri), pakai `/live`._",
             parse_mode="Markdown",
         )
 
@@ -1168,7 +1681,14 @@ class TelegramBot:
             except Exception:  # noqa: BLE001
                 pass
 
-        result = await self.harvester.harvest(provider, user_id=user_id, progress=report)
+        chat_id = update.effective_message.chat_id if update.effective_message else None
+
+        async def ask(question: str) -> str | None:
+            return await self._ask_user(user_id, question, chat_id=chat_id)
+
+        result = await self.harvester.harvest(
+            provider, user_id=user_id, progress=report, ask=ask
+        )
 
         if result.needs_login:
             from app.llm.capacity import acquire_message
@@ -1263,6 +1783,70 @@ class TelegramBot:
         if saved:
             lines += ["", "Cek stok sekarang: `/stok`"]
         await message.reply_text("\n".join(lines) or "Tidak ada yang bisa disimpan.", parse_mode="Markdown")
+
+    async def _answer_api_lookup(self, update: Update, subject: str) -> None:
+        """Answer "where do I get an API for X" from the public-apis directory.
+
+        The catalog is a directory of services, not a bag of keys - a point
+        worth making in the reply, because the request was literally "take the
+        key from public-apis" and a user who expects keys will otherwise think
+        the feature is broken. What it gives is the part before the key: which
+        services exist, which need a credential, and where to sign up. From
+        there `/akun` + "ambilkan key" finishes the job.
+        """
+        message = update.effective_message
+        if message is None:
+            return
+        entries = await self.catalog.search(subject, needs_key=True, https_only=True, limit=8)
+        if not entries:
+            entries = await self.catalog.search(subject, https_only=True, limit=8)
+        if not entries:
+            total = await self.catalog.count()
+            await message.reply_text(
+                f"Tidak ketemu API untuk *{subject or 'itu'}* di direktori "
+                f"({total:,} layanan, {len(await self.catalog.categories())} kategori).\n\n"
+                "Coba kata kunci lain, atau sebut kategorinya: cuaca, berita, "
+                "keuangan, musik, olahraga, kesehatan.",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = [
+            f"🔎 *API untuk* _{subject}_ — dari direktori public-apis",
+            "",
+            f"Aku temukan {len(entries)} yang cocok:",
+            "",
+        ]
+        lines += [entry.render() for entry in entries]
+        lines += [
+            "",
+            "Catatan: direktori ini berisi *daftar layanan + alamat pendaftaran*, "
+            "bukan kuncinya. Kunci tetap kamu ambil di situsnya.",
+            "",
+            "Cara paling cepat - biar aku yang urus:",
+            f"1) `/akun <situs> <email> <password>` (sekali saja)",
+            f"2) bilang: `ambilkan key <nama provider>`",
+            "",
+            "Aku yang buka konsolnya, kamu tidak perlu klik-klik.",
+        ]
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_api(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """`/api <kata kunci>` - look up the directory on demand."""
+        self._authorise(update.effective_user.id)
+        args = list(context.args or [])
+        if not args:
+            cats = await self.catalog.categories()
+            total = await self.catalog.count()
+            await update.message.reply_text(
+                f"📚 *Direktori public-apis* — {total:,} layanan, {len(cats)} kategori\n\n"
+                "Pakai: `/api <kata kunci>`\n"
+                "Contoh: `/api cuaca`, `/api berita`, `/api crypto`\n\n"
+                "Kategori: " + ", ".join(cats[:30]),
+                parse_mode="Markdown",
+            )
+            return
+        await self._answer_api_lookup(update, " ".join(args))
 
     async def _discover_on_site(self, update: Update, url: str) -> None:
         """Go to a site the user names and report every key visible there.
@@ -1532,7 +2116,12 @@ class TelegramBot:
             return "failed"
 
         user_id = update.effective_user.id
-        result = await self.harvester.harvest(provider, user_id=user_id)
+        chat_id = update.effective_message.chat_id if update.effective_message else None
+
+        async def ask(question: str) -> str | None:
+            return await self._ask_user(user_id, question, chat_id=chat_id)
+
+        result = await self.harvester.harvest(provider, user_id=user_id, ask=ask)
         if result.needs_login:
             return "login"
         if not result.ok:

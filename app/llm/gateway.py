@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,32 @@ from app.llm.key_pool import looks_like_rate_limit
 from app.llm.tokens import count_message_tokens, trim_messages
 
 log = get_logger(__name__)
+
+# The task currently running, so every call made inside it is charged to the
+# same ceiling. A ContextVar keeps this correct per task instead of per process,
+# which matters because the bot handles users concurrently.
+_CURRENT_TASK: ContextVar[Any] = ContextVar("llm_current_task", default=None)
+
+
+@dataclass
+class _TaskBinding:
+    """A context manager that scopes LLM spending to one task."""
+
+    gateway: Any
+    task: Any
+    _token: Any = None
+
+    def __enter__(self):
+        self._token = _CURRENT_TASK.set(self.task)
+        return self.task
+
+    def __exit__(self, *exc):
+        _CURRENT_TASK.reset(self._token)
+        return False
+
+
+def _TASK_BINDING(gateway, task):
+    return _TaskBinding(gateway=gateway, task=task)
 
 # Logical tier -> per-provider model, tried in the user's configured order.
 TIER_MODELS: dict[str, dict[str, str]] = {
@@ -134,11 +161,12 @@ def _export_provider_env(provider: str, settings) -> None:
 
 
 class LLMGateway:
-    def __init__(self, settings, budget=None, key_pool=None):
+    def __init__(self, settings, budget=None, key_pool=None, cost_guard=None):
         self.settings = settings
         self.budget = budget
         self._litellm = None
         self.key_pool = key_pool
+        self.cost_guard = cost_guard
 
     # ------------------------------------------------------------------
     def _import(self):
@@ -154,6 +182,19 @@ class LLMGateway:
 
     def available(self) -> bool:
         return bool(self.settings.available_providers())
+
+    # ------------------------------------------------------------ task scope
+    def _current_task(self):
+        return _CURRENT_TASK.get()
+
+    def bind_task(self, task):
+        """Charge every call inside this block to ``task``.
+
+        Returns the context manager itself: ``_TASK_BINDING`` builds one, it is
+        not a ContextVar, so calling ``.set`` on it crashed every chat with
+        "'function' object has no attribute 'set'".
+        """
+        return _TASK_BINDING(self, task)
 
     def candidates(self, tier: str) -> list[tuple[str, str]]:
         models = TIER_MODELS.get(tier, TIER_MODELS["small"])
@@ -231,6 +272,21 @@ class LLMGateway:
         attempts: list[str] = []
         last_error: Exception | None = None
 
+        # Refuse before spending, not after. The day total comes from the store
+        # so a restart cannot reset the meter, and the per-task ceiling stops a
+        # repair loop from eating the whole day on one stubborn site.
+        task = self._current_task()
+        if self.cost_guard is not None:
+            day_used = 0
+            if self.budget is not None and user_id:
+                try:
+                    day_used = (await self.budget.usage(user_id))["total_tokens"]
+                except Exception as exc:  # noqa: BLE001 - never block on bookkeeping
+                    log.warning("usage lookup failed: %s", exc)
+            self.cost_guard.check(
+                wanted=prompt_tokens + output_cap, day_used=day_used, task=task
+            )
+
         for provider, model in self.candidates(tier):
             # Pick the active key from the pool and force it into the env var
             # LiteLLM reads. ``setdefault`` would keep a benched key alive after
@@ -270,6 +326,8 @@ class LLMGateway:
                     )
                     if self.budget and user_id:
                         await self.budget.record(user_id, model, p_tokens, c_tokens)
+                    if task is not None:
+                        task.record(p_tokens + c_tokens, note=f"{provider}/{tier}")
                     if self.key_pool:
                         self.key_pool.record_use(provider)
                     # "module" is a reserved LogRecord attribute; passing it in
@@ -302,6 +360,25 @@ class LLMGateway:
                         attempt,
                         exc,
                     )
+                    # "Request too large" is a token limit on the prompt, so
+                    # rotating keys cannot help - the request itself must shrink.
+                    # This must run before, and independently of, the key pool: a
+                    # single-key setup hits the same wall.
+                    #
+                    # The provider counts input *and* the max_tokens reservation
+                    # against its per-minute budget, so both have to come down.
+                    # One aggressive step is deliberate: the retry budget is
+                    # small, and halving 24000 to 12000 would still exceed an
+                    # 8000/min free tier and burn the remaining attempts.
+                    if _looks_like_prompt_too_large(exc) and budget_tokens > 2000:
+                        model_cap = min(model_cap, 2000)
+                        budget_tokens = min(budget_tokens // 2, 5000 - model_cap)
+                        budget_tokens = max(1500, budget_tokens)
+                        prepared = trim_messages(messages, budget_tokens)
+                        prompt_tokens = count_message_tokens(prepared)
+                        attempts.append(f"{provider}:shrink->{budget_tokens}")
+                        await asyncio.sleep(min(3.0, 1.0 * (attempt + 1)))
+                        continue
                     # A throttled key is not a broken provider. Bench it, swap
                     # in the next one, and retry here before falling through -
                     # otherwise one exhausted free tier takes the whole
@@ -419,6 +496,33 @@ _AUTH_FAILURE_MARKERS = (
     "permission denied",
     "invalid authentication",
 )
+
+
+def _looks_like_prompt_too_large(error: Exception | None) -> bool:
+    """True when the provider rejected the request because it is too big.
+
+    Distinct from throttling: rotating to another key does not help, because the
+    limit is tokens-per-minute on the *prompt*, not requests on the key. The only
+    fix is to send less. Groq's free tier, for example, allows 8000 tokens per
+    minute, and a web-build prompt of 11k was rejected every single time while
+    the bot dutifully benched and rotated a perfectly healthy key.
+    """
+    if error is None:
+        return False
+    blob = f"{type(error).__name__} {error}".lower()
+    return any(
+        marker in blob
+        for marker in (
+            "request too large",
+            "tokens per minute",
+            "tpm",
+            "reduce your message size",
+            "context length",
+            "context_length_exceeded",
+            "maximum context",
+            "too many tokens",
+        )
+    )
 
 
 def _looks_like_auth_failure(error: Exception | None) -> bool:

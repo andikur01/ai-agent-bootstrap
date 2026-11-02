@@ -50,6 +50,9 @@ class Deployment:
 class DeployService:
     def __init__(self, settings):
         self.settings = settings
+        # The application starts one SiteHost at boot and hands it here, so a
+        # deploy reuses the already-bound port instead of racing it.
+        self.site_host = None
 
     async def deploy_static(self, root: Path, *, project_name: str) -> Deployment:
         errors: list[str] = []
@@ -64,10 +67,61 @@ class DeployService:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{provider}: {str(exc)[:200]}")
                 log.warning("deploy via %s failed: %s", provider, exc)
+
+        # Neither cloud provider is usable. Before handing back a zip file, try
+        # the bot's own public port - the user asked for a website, and a link
+        # they can open beats a path they have to download.
+        hosted = await self._self_host(Path(root), project_name)
+        if hosted is not None:
+            return hosted
+
         raise ToolError(
             "Deploy statis gagal. " + " | ".join(errors),
             detail="Isi CLOUDFLARE_API_TOKEN+CLOUDFLARE_ACCOUNT_ID atau GITHUB_TOKEN+GITHUB_OWNER.",
         )
+
+    async def _self_host(self, root: Path, project_name: str) -> Deployment | None:
+        """Serve the site on the bot's own public port.
+
+        Returns None when hosting is not configured or the port is taken, so
+        the caller falls through to the existing zip behaviour.
+        """
+        base = (self.settings.public_base_url or "").strip()
+        if not base:
+            return None
+        try:
+            from app.services.hosting_service import SiteHost, probe_public_url
+
+            # Prefer the host started at boot. Creating a second one would try to
+            # bind a port that is already taken and silently fail.
+            host = self.site_host
+            if host is None:
+                host = SiteHost(
+                    self.settings.outputs_path / "sites",
+                    port=self.settings.site_host_port,
+                    public_base_url=base,
+                )
+                if not await host.start():
+                    return None
+                self.site_host = host
+            url = host.publish(root, project_name=project_name)
+            live = await probe_public_url(url)
+            return Deployment(
+                url=url,
+                provider="server-ini",
+                project=project_name,
+                kind="static",
+                details={
+                    "note": (
+                        "Link hidup dan sudah aku cek dari luar."
+                        if live
+                        else "Link dibuat, tapi belum aku pastikan bisa dibuka."
+                    )
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("self host failed: %s", exc)
+            return None
 
     async def deploy_fullstack(
         self, root: Path, *, project_name: str, env_vars: dict[str, str]
@@ -142,10 +196,41 @@ class DeployService:
         )
 
     # ---------------------------------------------------------- github pages
+    async def _github_login(self) -> str:
+        """Ask GitHub who this token belongs to, and remember the answer.
+
+        Cached on the instance: the answer never changes for a given token, and
+        every deploy asking again would be a wasted round trip.
+        """
+        cached = getattr(self, "_owner_cache", None)
+        if cached:
+            return cached
+        headers = {
+            "Authorization": f"Bearer {self.settings.github_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get("https://api.github.com/user", headers=headers)
+                if response.status_code == 200:
+                    login = str(response.json().get("login") or "")
+                    if login:
+                        self._owner_cache = login
+                        log.info("github owner detected from token: %s", login)
+                        return login
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not detect github owner: %s", exc)
+        return ""
+
     async def _github_pages(self, root: Path, project_name: str) -> Deployment:
         if not self.settings.github_token:
             raise MissingSecretError("GITHUB_TOKEN")
-        owner = self.settings.github_owner
+        # The owner is derivable from the token, so do not make the user find
+        # it. They had a working GITHUB_TOKEN and still got no deploy, purely
+        # because GITHUB_OWNER was blank - that is a configuration question the
+        # bot can answer itself.
+        owner = self.settings.github_owner or await self._github_login()
         if not owner:
             raise MissingSecretError("GITHUB_OWNER")
 

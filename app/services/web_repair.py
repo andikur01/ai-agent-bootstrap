@@ -73,10 +73,24 @@ class WebRepairService:
         result = RepairResult(ok=False, project=project)
         previous_issue_count = 10**6
 
+        # Every QA screenshot goes to the live feed the moment it is taken, so
+        # the user watches the real pages render instead of a stalled bar. The
+        # feed only needs the path; pushing is cheap and never blocks.
+        async def _on_page(page_report, viewport: str, feed_frame: str = "") -> None:
+            if progress is None or not feed_frame:
+                return
+            try:
+                await progress(0, f"Cek tampilan {viewport}", screenshot=feed_frame)
+            except Exception as exc:  # noqa: BLE001 - a feed frame is never fatal
+                log.debug("live feed push failed: %s", exc)
+
         for round_index in range(1, self.max_rounds + 1):
             if progress:
+                # The build phase already climbed to ~75%, so the ship phase
+                # has to continue above it. Starting again at 20% made the bar
+                # jump backwards, which is what the user saw as "loncat-loncat".
                 await progress(
-                    20 + int(60 * (round_index - 1) / self.max_rounds),
+                    80 + int(10 * (round_index - 1) / self.max_rounds),
                     f"Putaran {round_index}/{self.max_rounds}: deploy",
                 )
 
@@ -84,15 +98,17 @@ class WebRepairService:
             if deployment is None:
                 # No deploy credentials: QA the local build instead of failing.
                 if progress:
-                    await progress(50, "Tidak ada kredensial deploy, QA lokal")
+                    await progress(85, "Tidak ada kredensial deploy, QA lokal")
                 report = await self.qa.check_local_file(
-                    project.entry, fill_forms=fill_forms
+                    project.entry, fill_forms=fill_forms, on_page=_on_page
                 )
                 report_url = f"file://{project.entry}"
             else:
                 if progress:
-                    await progress(50, f"QA otomatis: {deployment.url}")
-                report = await self.qa.check_site(deployment.url, fill_forms=fill_forms)
+                    await progress(85, f"QA otomatis: {deployment.url}")
+                report = await self.qa.check_site(
+                    deployment.url, fill_forms=fill_forms, on_page=_on_page
+                )
                 report_url = deployment.url
                 result.deployment = deployment
 
@@ -118,13 +134,13 @@ class WebRepairService:
             if len(report.issues()) >= previous_issue_count and round_index > 1:
                 log.info("repair stalled at %s issues; stopping", len(report.issues()))
                 if progress:
-                    await progress(80, "Perbaikan tidak menurunkan jumlah masalah, berhenti")
+                    await progress(90, "Perbaikan tidak menurunkan jumlah masalah, berhenti")
                 break
             previous_issue_count = len(report.issues())
 
             if progress:
                 await progress(
-                    60 + int(30 * round_index / self.max_rounds),
+                    92,
                     f"Perbaiki {len(report.issues())} masalah",
                 )
             try:

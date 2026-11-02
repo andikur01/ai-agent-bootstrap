@@ -141,6 +141,40 @@ def test_web_builder_rejects_path_traversal(tmp_path, settings):
     assert all(str(p).startswith(str(project.root)) for p in project.files)
 
 
+def test_double_escaped_content_is_decoded(tmp_path, settings):
+    """A file that arrives as one escaped line must be written as real lines.
+
+    Some models return valid JSON whose string values are themselves escaped,
+    so a newline arrives as the two characters backslash-n. The JSON parses, the
+    file is written, and the result is a single line - which the browser reports
+    as "Invalid or unexpected token" for JavaScript.
+    """
+    builder = WebBuilder(settings, gateway=None, outputs_dir=tmp_path)
+    spec = {
+        "title": "Escaped",
+        "files": [
+            {
+                "path": "index.html",
+                "content": "<!DOCTYPE html>\\n<html>\\n<body>🛍️ Toko</body>\\n</html>",
+            }
+        ],
+    }
+    project = builder._materialise(spec, "static", "escaped")
+    html = (project.root / "index.html").read_text(encoding="utf-8")
+    assert html.count("\n") == 3
+    assert "\\n" not in html
+    # Non-ASCII must survive the decode intact.
+    assert "🛍️" in html
+
+
+def test_normal_content_is_left_untouched(tmp_path, settings):
+    builder = WebBuilder(settings, gateway=None, outputs_dir=tmp_path)
+    original = "<!DOCTYPE html>\n<html>\n<body>ok</body>\n</html>"
+    spec = {"title": "Normal", "files": [{"path": "index.html", "content": original}]}
+    project = builder._materialise(spec, "static", "normal")
+    assert (project.root / "index.html").read_text(encoding="utf-8") == original
+
+
 # ---------------------------------------------------------------------- n8n
 def test_n8n_assembles_valid_document(settings, tmp_path):
     service = N8nService(settings, gateway=None, outputs_dir=tmp_path)

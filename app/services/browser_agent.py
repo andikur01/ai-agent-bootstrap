@@ -29,6 +29,33 @@ log = get_logger(__name__)
 MAX_ELEMENTS = 40
 DEFAULT_STEPS = 8
 
+# A visible pointer the agent moves before it clicks or types. Playwright's own
+# clicks are invisible, so on a shared screen the page appears to change by
+# itself and the user cannot follow what the agent is doing. This draws a dot
+# that slides to the target first. Purely cosmetic: it is a fixed-position div
+# that ignores pointer events, and it is never part of the element list the
+# model chooses from.
+_CURSOR_INIT_JS = """
+() => {
+  if (window.__agentCursor) return;
+  const c = document.createElement('div');
+  c.id = '__agent_cursor';
+  c.style.cssText = 'position:fixed;z-index:2147483647;width:20px;height:20px;'
+    + 'margin:-10px 0 0 -10px;border-radius:50%;background:rgba(255,60,60,.85);'
+    + 'border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4);'
+    + 'pointer-events:none;transition:left .3s ease,top .3s ease;left:-50px;top:-50px;';
+  document.documentElement.appendChild(c);
+  window.__agentCursor = c;
+}
+"""
+
+_CURSOR_MOVE_JS = """
+([x, y]) => {
+  const c = window.__agentCursor;
+  if (c) { c.style.left = x + 'px'; c.style.top = y + 'px'; }
+}
+"""
+
 # Elements worth exposing to the model: things a person can actually operate.
 _INTERACTIVE = (
     "a[href]",
@@ -162,6 +189,7 @@ class BrowserAgent:
         profiles=None,
         vault=None,
         live_view=None,
+        ask=None,
     ):
         self.settings = settings
         self.gateway = gateway
@@ -174,6 +202,9 @@ class BrowserAgent:
         self.profiles = profiles
         self.vault = vault
         self.live_view = live_view
+        # Mid-task question hook, so a login wall can ask the user for an account
+        # instead of giving up. Signature: async (question) -> answer | None.
+        self.ask = ask
         # Set when the agent downloads a produced file, so the caller can send it.
         self.downloaded: Path | None = None
 
@@ -204,8 +235,12 @@ class BrowserAgent:
                 except Exception as exc:  # noqa: BLE001
                     return BrowserRun(False, error=f"Gagal buka {url}: {str(exc)[:200]}")
 
+                await self._install_cursor(page)
+
                 # A saved login turns a wall into a page the agent can work with.
                 await self._maybe_sign_in(page, url, progress=progress)
+                # No saved login: ask the user for one now, rather than stopping.
+                await self._ask_for_account(page, url, progress=progress)
 
                 history = [f"Tugas: {task}"]
                 for step in range(1, budget + 1):
@@ -341,6 +376,101 @@ class BrowserAgent:
             log.debug("saved-account sign-in skipped: %s", exc)
             return False
 
+    async def _install_cursor(self, page) -> None:
+        """Draw the visible pointer, if the page allows it. Never fatal."""
+        try:
+            await page.evaluate(_CURSOR_INIT_JS)
+        except Exception as exc:  # noqa: BLE001 - a cursor is a nicety, not a step
+            log.debug("cursor not installed: %s", exc)
+
+    async def _move_cursor(self, page, target: Element) -> None:
+        """Slide the pointer onto the element the model is about to touch."""
+        try:
+            handle = await self._locator(page, target)
+            if handle is None:
+                return
+            box = await handle.bounding_box()
+            if not box:
+                return
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            await page.evaluate(_CURSOR_MOVE_JS, [x, y])
+            await page.wait_for_timeout(350)  # let the slide finish before the click
+        except Exception as exc:  # noqa: BLE001
+            log.debug("cursor move skipped: %s", exc)
+
+    async def _ask_for_account(self, page, url: str, *, progress=None) -> bool:
+        """Ask the user for a login when the page demands one and none is saved.
+
+        The point of the whole feature is that the agent does not stop at a wall.
+        If it has no saved account, it asks for one in the chat, saves it, and
+        signs in - all inside the same task. The user types it once; every later
+        visit reuses it.
+        """
+        if self.ask is None or self.vault is None:
+            return False
+        try:
+            from app.services.browser_session import host_from_url
+
+            host = host_from_url(url)
+        except Exception:  # noqa: BLE001
+            return False
+        if not host:
+            return False
+
+        try:
+            from app.services.key_harvester import KeyHarvester
+
+            helper = KeyHarvester(
+                self.settings, profiles=self.profiles, outputs_dir=self.outputs, vault=self.vault
+            )
+            if not await helper._login_wall(page):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            log.debug("login-wall check failed: %s", exc)
+            return False
+
+        question = (
+            f"🔐 Situs `{host}` minta login, dan aku belum punya akunnya.\n\n"
+            "Kirim email dan password dalam satu baris, pisah pakai spasi:\n"
+            f"`{host} email@kamu.com passwordkamu`\n\n"
+            "Aku simpan di server ini (tidak di-commit), lalu langsung login "
+            "sendiri dan lanjut kerja. Pesanmu aku hapus setelah tersimpan."
+        )
+        answer = await self.ask(question)
+        if not answer:
+            return False
+
+        parts = answer.strip().split()
+        if len(parts) < 2:
+            return False
+        # The user may paste with or without the host, because this is a free-text
+        # reply, not a command. If the first token looks like an email, the host
+        # comes from the wall we are standing on.
+        if "@" in parts[0]:
+            email, password = parts[0], " ".join(parts[1:])
+        elif len(parts) >= 3:
+            host = parts[0].lstrip("/").lower()
+            email, password = parts[1], " ".join(parts[2:])
+        else:
+            return False
+        if not email or not password:
+            return False
+
+        self.vault.put(host, email, password)
+        if progress:
+            await progress(12, f"Akun {host} tersimpan, aku login sendiri...")
+        try:
+            from app.services.key_harvester import KeyHarvester
+
+            helper = KeyHarvester(
+                self.settings, profiles=self.profiles, outputs_dir=self.outputs, vault=self.vault
+            )
+            return await helper.sign_in_with_saved_account(page, host, progress=progress)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("sign-in with a just-saved account failed: %s", exc)
+            return False
+
     async def _observe(self, page, step: int) -> Observation:
         try:
             url = page.url
@@ -465,10 +595,12 @@ class BrowserAgent:
                 return f"elemen #{action.index} sudah tidak ada di halaman"
 
             if action.kind == "click":
+                await self._move_cursor(page, target)
                 await handle.click(timeout=8000)
                 await page.wait_for_timeout(1200)
                 return f"klik {target.label!r}"
             if action.kind == "type":
+                await self._move_cursor(page, target)
                 await handle.fill(action.text, timeout=8000)
                 return f"isi {target.label!r} dengan {action.text!r}"
             if action.kind == "download":

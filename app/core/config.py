@@ -70,9 +70,11 @@ class Settings(BaseSettings):
     )
     small_model: str = "groq/openai/gpt-oss-20b"
     big_model: str = "groq/openai/gpt-oss-120b"
-    # 0 = tidak dibatasi. Cap membuat AI menyerah di tengah tugas dan
-    # mengirim hasil jelek, jadi default-nya bebas.
-    daily_token_budget: int = 0
+    # Daily token ceiling. It used to default to 0 (unlimited), which is
+    # exactly how one day reached a million tokens: nothing ever said "enough".
+    # 150k is roughly a few hundred normal chats or a handful of web builds.
+    # Set 0 only when you deliberately want no ceiling.
+    daily_token_budget: int = 150000
     semantic_cache_enabled: bool = True
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
@@ -100,11 +102,31 @@ class Settings(BaseSettings):
     # How many observe/act steps the agent may take on one page before it stops.
     browser_max_steps: int = 8
     browser_login_seconds: int = 240
+    # How long a task waits for the user to send a verification code before it
+    # gives up. Too short and a real code arrives late; too long and a task
+    # nobody is watching holds the worker.
+    handoff_timeout_seconds: int = 300
     # Public URL of the noVNC page, so /live can hand the user a link.
     live_view_host: str = ""
     live_view_port: int = 12001
     # Headless server? /login runs the browser under xvfb and sends screenshots.
     browser_headful: bool = True
+    # Drive the real browser-use agent (github.com/browser-use/browser-use) for
+    # tasks that need judgement - multi-page flows, reading a result out of a
+    # page. It lives in its own virtualenv because its pins conflict with ours.
+    # Empty means "use ./.venv-browser".
+    browser_use_venv: str = ""
+    # Model for browser-use. Empty lets the driver pick per configured provider.
+    browser_use_model: str = ""
+    # Headless is required on a server; a headless browser cannot be watched.
+    browser_headless: bool = True
+    # Steps cap for one browser-use task. Every step is a model call, so this is
+    # also a spend cap.
+    browser_use_max_steps: int = 8
+    # Post the agent's screen into the chat as a moving tile while it works.
+    live_feed_enabled: bool = True
+    # Seconds between feed updates. Under ~4s the GIFs overlap on a slow link.
+    live_feed_interval: float = 6.0
 
     # ---------- Search ----------
     tavily_api_key: str = ""
@@ -127,6 +149,11 @@ class Settings(BaseSettings):
     ffprobe_bin: str = "ffprobe"
 
     # ---------- Deploy ----------
+    # Server ini punya port publik. Dipakai sebagai hosting cadangan ketika
+    # token Cloudflare/GitHub tidak boleh deploy - supaya user selalu dapat
+    # LINK, bukan cuma file zip. Isi dengan URL publik server ini.
+    public_base_url: str = ""
+    site_host_port: int = 12000
     github_token: str = ""
     github_owner: str = ""
     cloudflare_api_token: str = ""

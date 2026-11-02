@@ -139,6 +139,11 @@ class ProgressReporter:
         async with self._lock:
             now = time.monotonic()
             percent = max(0, min(100, int(percent)))
+            # Never move backwards. Phases report their own local scale, so a
+            # later phase can legitimately send a smaller number; showing that
+            # makes the bar jump around and reads as a broken progress bar.
+            if percent < self._last_percent and self._last_percent < 100:
+                percent = self._last_percent
             moved = percent - self._last_percent >= 5 or percent in (0, 100)
             elapsed = now - self._last_sent
 

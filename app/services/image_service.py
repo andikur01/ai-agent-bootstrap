@@ -147,68 +147,22 @@ class ImageService:
         return providers
 
     async def _generate_local(self, prompt: str, path: Path, size: str, negative: str) -> None:
-        """Deterministic offline image built from the prompt.
+        """Refuse to fake it.
 
-        Not a diffusion model - a composed gradient poster with the subject text.
-        It exists so "buatkan gambar" degrades to something usable instead of an
-        error when the network providers are unavailable.
+        This used to compose a gradient poster with the prompt printed on it, so
+        the user always received *something*. That was a mistake: the user asked
+        for a picture of a table and got a wall of text reading "table", which
+        reads as a broken product rather than an honest failure. A clear "the
+        image service is busy, try again" is worth more than a convincing-looking
+        non-image.
+
+        It still exists so the provider list has a named last resort, but it
+        declines rather than draws.
         """
-        import asyncio as _asyncio
-
-        from PIL import Image, ImageDraw, ImageFilter
-
-        width, height = _parse_size(size)
-
-        def _render() -> None:
-            seed = _stable_seed(prompt)
-            top = ((seed * 37) % 200 + 20, (seed * 53) % 160 + 40, (seed * 71) % 200 + 40)
-            bottom = ((seed * 91) % 200 + 20, (seed * 17) % 160 + 30, (seed * 29) % 200 + 50)
-            image = Image.new("RGB", (width, height))
-            draw = ImageDraw.Draw(image)
-            for y in range(height):
-                ratio = y / max(1, height - 1)
-                draw.line(
-                    [(0, y), (width, y)],
-                    fill=tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3)),
-                )
-
-            # soft blobs for visual interest
-            blobs = Image.new("RGB", (width, height), (0, 0, 0))
-            blob_draw = ImageDraw.Draw(blobs)
-            for index in range(5):
-                cx = (seed * (index + 3) * 13) % width
-                cy = (seed * (index + 7) * 17) % height
-                radius = (width // 6) + (index * 11) % (width // 8)
-                tone = (
-                    (seed * (index + 2) * 31) % 200 + 30,
-                    (seed * (index + 5) * 41) % 200 + 30,
-                    (seed * (index + 9) * 23) % 200 + 30,
-                )
-                blob_draw.ellipse(
-                    [cx - radius, cy - radius, cx + radius, cy + radius], fill=tone
-                )
-            blobs = blobs.filter(ImageFilter.GaussianBlur(radius=width // 12))
-            image = Image.blend(image, blobs, 0.55)
-
-            overlay = ImageDraw.Draw(image)
-            font = _load_font(max(20, width // 22))
-            title = prompt.strip()[:60]
-            wrapped = _wrap_text(title, 26)
-            text_y = height // 2 - (len(wrapped) * (width // 18)) // 2
-            for line in wrapped[:3]:
-                bbox = overlay.textbbox((0, 0), line, font=font)
-                overlay.text(
-                    ((width - (bbox[2] - bbox[0])) // 2, text_y),
-                    line,
-                    font=font,
-                    fill=(248, 250, 252),
-                    stroke_width=2,
-                    stroke_fill=(15, 23, 42),
-                )
-                text_y += width // 16
-            image.save(path)
-
-        await _asyncio.to_thread(_render)
+        raise ToolError(
+            "Provider gambar sedang penuh (rate limit) dan aku tidak mau "
+            "mengirim gambar palsu. Coba lagi sebentar lagi ya."
+        )
 
     async def _generate_hf(self, prompt: str, path: Path, size: str, negative: str) -> None:
         if not self.settings.hf_token:
@@ -237,47 +191,63 @@ class ImageService:
     async def _generate_pollinations(
         self, prompt: str, path: Path, size: str, negative: str
     ) -> None:
+        """Fetch an image from Pollinations, patiently.
+
+        The free tier rate limits hard: measured here, roughly half of requests
+        answered 402 when fired back to back, and nearly all of them succeeded
+        when spaced a few seconds apart. The previous version retried twice with
+        a 3s pause and then gave up, which dropped the request into the local
+        text-render fallback - the user asked for a picture of a table and got a
+        gradient with the word "table" printed on it.
+
+        So: many attempts, growing backoff, and rotate the model each round. This
+        is the difference between "the AI cannot draw" and "we did not wait long
+        enough", and it is worth 30 seconds of waiting.
+        """
         width, height = _parse_size(size)
-        # The free tier answers 402 (rate limited) and 5xx under load. Retrying
-        # the same request often succeeds, and the cheaper `turbo` model is a
-        # second lane when `flux` keeps getting throttled.
-        variants = [
-            {"model": "flux", "enhance": "true"},
-            {"model": "flux", "enhance": "false"},
-            {"model": "turbo", "enhance": "false"},
-        ]
-        headers = {"Referer": "https://github.com/andikur01/ai-agent-bootstrap"}
+        headers = {
+            "Referer": "https://github.com/andikur01/ai-agent-bootstrap",
+            "User-Agent": "ai-agent-bootstrap/1.0 (+https://github.com/andikur01/ai-agent-bootstrap)",
+        }
+        # flux renders best; sana is the model the free tier actually serves now.
+        models = ["flux", "sana", "turbo", "flux"]
         last_error: Exception | None = None
+        seed = _stable_seed(prompt)
+
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            for index, variant in enumerate(variants):
+            for round_index, model in enumerate(models):
                 query = urllib.parse.urlencode(
                     {
                         "width": width,
                         "height": height,
                         "nologo": "true",
-                        "seed": _stable_seed(prompt),
-                        **variant,
+                        "seed": seed + round_index,
+                        "model": model,
+                        "enhance": "true" if round_index == 0 else "false",
                     }
                 )
                 url = f"{self.settings.pollinations_base_url}/{urllib.parse.quote(prompt)}?{query}"
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
                         response = await client.get(url, headers=headers)
                         if response.status_code in (402, 429, 500, 502, 503, 504):
-                            raise ToolError(f"Pollinations sibuk ({response.status_code})")
+                            raise ToolError(f"sibuk ({response.status_code})")
                         response.raise_for_status()
                         content_type = response.headers.get("content-type", "")
                         if "image" not in content_type:
-                            raise ToolError(f"Pollinations tidak mengembalikan gambar ({content_type})")
+                            raise ToolError(f"bukan gambar ({content_type})")
+                        if len(response.content) < 2000:
+                            raise ToolError("gambar terlalu kecil, kemungkinan gagal")
                         path.write_bytes(response.content)
                         return
                     except Exception as exc:  # noqa: BLE001
                         last_error = exc
-                        if attempt < 1:
-                            await asyncio.sleep(3.0)
-                if index < len(variants) - 1:
+                        # Growing pause. The rate limiter clears on its own; the
+                        # only mistake would be to stop waiting too early.
+                        await asyncio.sleep(4.0 + 3.0 * attempt)
+                if round_index < len(models) - 1:
                     await asyncio.sleep(2.0)
-            raise ToolError(f"Pollinations gagal di semua varian: {last_error}")
+            raise ToolError(f"Pollinations gagal setelah {len(models) * 3} percobaan: {last_error}")
 
     # ---------------------------------------------------------------- edit
     async def edit(

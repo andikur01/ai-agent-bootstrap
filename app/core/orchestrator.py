@@ -24,7 +24,9 @@ from typing import Awaitable, Callable
 from app.core.errors import AgentError, MissingSecretError, TaskCancelledError
 from app.core.intent import Intent, Route, route_message
 from app.core.logging_setup import get_logger
+from app.core.specialists import Specialist, for_intent as specialist_for, pick as pick_specialists
 from app.core.thinking import ThinkingEngine
+from app.llm.cost_guard import BudgetExceeded
 from app.llm.tokens import count_message_tokens, estimate
 from app.memory.artifacts import (
     KIND_AUDIO,
@@ -39,6 +41,7 @@ from app.memory.artifacts import (
 from app.services.audio_service import AudioService
 from app.services.browser_agent import BrowserAgent
 from app.services.browser_qa import BrowserQA
+from app.services import browser_use_service
 from app.services.deploy_service import DeployService
 from app.services.image_service import ImageService
 from app.services.link_service import LinkIngestService, answer_about_link
@@ -51,18 +54,8 @@ from app.services.web_repair import WebRepairService
 
 log = get_logger(__name__)
 
-PERSONA = """Kamu asisten pribadi lewat Telegram. Gaya: santai, jelas, to the point,
-Bahasa Indonesia. Kamu punya memori jangka panjang tentang user dan bisa membuat
-gambar, video, suara, website, dan workflow n8n.
-
-Aturan:
-- Jawab langsung. Jangan buka dengan "Tentu!" atau basa-basi.
-- Kalau user merujuk pekerjaan sebelumnya ("yang tadi", "lanjutkan"), konteks
-  referensinya sudah diberikan di bawah. Pakai itu, jangan tanya ulang.
-- Kalau kamu butuh sesuatu dari user (file, token, izin), bilang persis apa yang
-  dibutuhkan dalam satu kalimat.
-- Jangan pernah mengaku sudah melakukan sesuatu yang belum kamu lakukan.
-- Ringkas: maksimal ~250 kata kecuali diminta detail."""
+# Personas now live in app.core.specialists, one per kind of work, so a website
+# is never written with a chat assistant's habits.
 
 CONFIRM_TEMPLATES = {
     Intent.IMAGE_CREATE: ("🎨 Bikin gambar baru", "image"),
@@ -130,6 +123,7 @@ class Outcome:
     tokens: int = 0
     cached: bool = False
     milestone_screenshots: list[str] = field(default_factory=list)
+    specialist: str = ""
 
 
 class Orchestrator:
@@ -146,6 +140,7 @@ class Orchestrator:
         profiles=None,
         vault=None,
         live_view=None,
+        cost_guard=None,
     ):
         self.settings = settings
         self.store = store
@@ -153,6 +148,7 @@ class Orchestrator:
         self.memory = memory
         self.cache = cache
         self.budget = budget
+        self.cost_guard = cost_guard
         self.scheduler = scheduler
         self.profiles = profiles
         self.vault = vault
@@ -161,7 +157,13 @@ class Orchestrator:
         outputs = settings.outputs_path
         self.images = ImageService(settings, outputs_dir=outputs)
         self.audio = AudioService(settings, outputs_dir=outputs)
-        self.videos = VideoService(settings, gateway=gateway, audio=self.audio, outputs_dir=outputs)
+        self.videos = VideoService(
+            settings,
+            gateway=gateway,
+            audio=self.audio,
+            images=self.images,
+            outputs_dir=outputs,
+        )
         self.search = SearchService(settings)
         self.links = LinkIngestService(settings, audio=self.audio, outputs_dir=outputs)
         self.web = WebBuilder(settings, gateway=gateway, outputs_dir=outputs)
@@ -182,6 +184,9 @@ class Orchestrator:
             vault=vault,
             live_view=live_view,
         )
+        # Set by the bot at wiring time. The browser agent uses it to ask the
+        # user for a login mid-task; None means it simply cannot ask.
+        self.ask_user = None
 
     # ------------------------------------------------------------------ route
     async def classify(
@@ -233,18 +238,47 @@ class Orchestrator:
         handler = getattr(self, f"_do_{route.intent.value}", None)
         if handler is None:
             handler = self._do_chat
+
+        # The expert for this kind of work. Handlers read it for persona, tier
+        # and budget, so a website is never written with a chat assistant's
+        # habits. The user asked for exactly this: hand the task to the expert.
+        expert = self.specialist_for_route(route)
+        route.args.setdefault("specialist", expert.key)
+
+        # Every model call inside this task is charged to one ceiling, so a
+        # repair loop cannot quietly spend the whole day on a single request.
+        task = None
+        binding = None
+        if self.cost_guard is not None:
+            low, high = self.estimate_tokens(route)
+            task = self.cost_guard.start_task(route.intent.value, estimate=high)
+            # A gateway without a spending scope (a stub, or a custom one) must
+            # not crash the task - the guard is an optimisation, not a
+            # prerequisite.
+            bind = getattr(self.gateway, "bind_task", None)
+            if bind is not None:
+                binding = bind(task)
         try:
-            outcome = await handler(
-                user_id,
-                route,
-                progress=progress,
-                photo_path=photo_path,
-                voice_path=voice_path,
-                document_path=document_path,
-                chat_id=chat_id,
-            )
+            if binding is not None:
+                binding.__enter__()
+            try:
+                outcome = await handler(
+                    user_id,
+                    route,
+                    progress=progress,
+                    photo_path=photo_path,
+                    voice_path=voice_path,
+                    document_path=document_path,
+                    chat_id=chat_id,
+                )
+            finally:
+                if binding is not None:
+                    binding.__exit__(None, None, None)
         except (MissingSecretError, TaskCancelledError):
             raise
+        except BudgetExceeded as exc:
+            await self.store.log_error(route.intent.value, str(exc), user_id)
+            return Outcome(text=exc.user_message(), specialist=expert.key)
         except AgentError as exc:
             await self.store.log_error(route.intent.value, str(exc), user_id)
             raise
@@ -252,7 +286,31 @@ class Orchestrator:
             await self.store.log_error(route.intent.value, f"{type(exc).__name__}: {exc}", user_id)
             log.exception("handler failed intent=%s", route.intent.value)
             raise AgentError("Ada error tak terduga saat menjalankan tugas ini.") from exc
+        if not outcome.specialist:
+            outcome.specialist = expert.key
+        if task is not None and task.calls:
+            log.info("task spend intent=%s %s", route.intent.value, task.summary())
         return outcome
+
+    def specialist_for_route(self, route: Route) -> Specialist:
+        """The expert for this route.
+
+        A delegation request ("kasih ke ahlinya, buat video") names its own
+        domain, so it wins over the default mapping for the intent.
+        """
+        text = str(route.args.get("text") or "")
+        chosen = route.args.get("delegate_specialist")
+        if chosen:
+            from app.core.specialists import by_key
+
+            expert = by_key(str(chosen))
+            if expert is not None:
+                return expert
+        if route.args.get("delegate"):
+            options = pick_specialists(text)
+            if options:
+                return options[0]
+        return specialist_for(route.intent)
 
     # ------------------------------------------------------------- continue
     async def _do_continue(self, user_id: int, route: Route, *, progress=None, **kwargs) -> Outcome:
@@ -309,11 +367,12 @@ class Orchestrator:
 
         if kind in (KIND_RESEARCH, KIND_LINK):
             question = f"Lanjutkan pembahasan: {title}"
+            expert = self.specialist_for_route(route)
             bundle = await self.memory.build_context(
-                user_id, question, persona=PERSONA, recent_turns=4
+                user_id, question, persona=expert.persona, recent_turns=4
             )
             result = await self.gateway.complete(
-                bundle.messages, tier="small", user_id=user_id, max_tokens=700
+                bundle.messages, tier=expert.tier, user_id=user_id, max_tokens=700
             )
             return Outcome(text=f"{header}\n\n{result.text.strip()}", tokens=result.total_tokens)
 
@@ -347,21 +406,45 @@ class Orchestrator:
                 return Outcome(text=hit.response, cached=True)
 
         reference = await self.memory.resolve_reference(user_id, text)
+        expert = self.specialist_for_route(route)
+        persona = await self._persona_for(user_id, expert)
         bundle = await self.memory.build_context(
-            user_id, text, persona=PERSONA, reference=reference
+            user_id, text, persona=persona, reference=reference
         )
 
         if progress:
             await progress(30, "Menyusun jawaban")
         result = await self.gateway.complete(
-            bundle.messages, tier="small", user_id=user_id, temperature=0.5, max_tokens=900
+            bundle.messages,
+            tier=expert.tier,
+            user_id=user_id,
+            temperature=0.5,
+            max_tokens=expert.max_tokens,
         )
         answer = result.text.strip()
 
         if self.settings.semantic_cache_enabled and len(answer) > 40:
             await self.cache.put(user_id, text, answer, namespace="chat")
 
-        return Outcome(text=answer, tokens=result.total_tokens)
+        return Outcome(text=answer, tokens=result.total_tokens, specialist=expert.key)
+
+    async def _persona_for(self, user_id: int, expert) -> str:
+        """The expert's own instructions, plus the user's freedom setting.
+
+        "Hidupkan bot" is the user's phrase for turning the assistant loose: it
+        stops hedging and starts deciding. The switch is stored per user, so it
+        survives restarts, and the expert persona is always kept - freedom is
+        about how much it acts on its own, never about dropping its standards.
+        """
+        try:
+            prefs = await self.store.get_prefs(user_id)
+        except Exception:  # noqa: BLE001 - prefs are never worth failing a reply
+            prefs = {}
+        if prefs.get("free_mode"):
+            from app.core.specialists import FREE_MODE_RULES
+
+            return f"{expert.persona}\n\n{FREE_MODE_RULES}"
+        return expert.persona
 
     async def _status_answer(self, user_id: int, text: str) -> str | None:
         """Answer a "is it done yet?" question from real artifact records.
@@ -539,12 +622,13 @@ class Orchestrator:
         transcript = await self.audio.speech_to_text(voice_path)
         question = str(route.args.get("question") or route.args.get("text") or "").strip()
         if question:
+            expert = self.specialist_for_route(route)
             result = await self.gateway.complete(
                 [
-                    {"role": "system", "content": PERSONA},
+                    {"role": "system", "content": expert.persona},
                     {"role": "user", "content": f"Transkrip suara user:\n{transcript}\n\nPertanyaan/instruksi: {question}"},
                 ],
-                tier="small",
+                tier=expert.tier,
                 user_id=user_id,
                 temperature=0.4,
             )
@@ -628,6 +712,59 @@ class Orchestrator:
         if progress:
             await progress(5, f"Membuka {url}")
 
+        # Specialist first: the real browser-use agent handles judgement calls
+        # (multi-page flows, reading a value out of a rendered page) far better
+        # than the built-in element-clicking loop. Fall back to that loop when
+        # browser-use is not installed, so the feature still works.
+        if browser_use_service.is_available(self.settings):
+            # Check the meter before spending, for the same reason the gateway
+            # does: browser-use talks to the provider directly, so it is the one
+            # path that can run up a bill the gateway never sees. Refusing here
+            # is what makes the daily budget actually hold.
+            allowed, note = await self._browser_budget_ok(user_id)
+            if not allowed:
+                return Outcome(text=note)
+
+            result = await browser_use_service.run_browser_use(
+                self.settings,
+                url=url,
+                task=task,
+                user_id=user_id,
+                max_steps=int(getattr(self.settings, "browser_use_max_steps", 8)),
+                profile_dir=self._browser_profile_dir(user_id),
+            )
+            # Record it even on failure: a failed run still sent prompts, and an
+            # unrecorded spend is how a meter drifts away from the real bill.
+            await self._record_browser_tokens(user_id, result)
+            if result.ok and result.answer.strip():
+                await self.memory.register_artifact(
+                    user_id,
+                    KIND_LINK,
+                    title=f"browse: {task[:60]}",
+                    location=url,
+                    meta={"task": task, "steps": result.steps[:10], "ok": True,
+                          "engine": "browser-use"},
+                )
+                body = result.answer.strip()
+                text_out = f"*Browser agent* (browser-use) selesai di `{url}`\n\n{body}"
+                shots = [s for s in result.screenshots if s][-2:]
+                return Outcome(
+                    text=text_out,
+                    url=url,
+                    milestone_screenshots=shots,
+                    tokens=result.tokens or estimate_tokens_for(Intent.THINK),
+                )
+            if result.error:
+                log.warning("browser-use failed, falling back: %s", result.error[:200])
+
+        # Wire the mid-task question hook so a login wall asks the user for an
+        # account instead of giving up. Bound to this user and this chat.
+        if self.ask_user is not None:
+            async def _ask(question: str) -> str | None:
+                return await self.ask_user(user_id, question, chat_id=kwargs.get("chat_id", 0))
+
+            self.browser.ask = _ask
+
         run = await self.browser.run(url, task, user_id=user_id, progress=progress)
 
         if not run.ok and run.error:
@@ -659,6 +796,63 @@ class Orchestrator:
             milestone_screenshots=shots,
             tokens=estimate_tokens_for(Intent.THINK),
         )
+
+    async def _browser_budget_ok(self, user_id: int) -> tuple[bool, str]:
+        """Would a browser task fit in today's budget? Says no before spending.
+
+        The gateway already refuses a call that cannot fit; browser-use bypasses
+        the gateway, so without this check that path is invisible to the meter
+        and can spend a whole day's budget unannounced.
+        """
+        budget = self.budget
+        if budget is None:
+            return True, ""
+        try:
+            remaining = await budget.remaining(user_id)
+        except Exception:  # noqa: BLE001 - never block work on bookkeeping
+            return True, ""
+        if budget.daily_budget <= 0:
+            return True, ""
+        # A browser task is a handful of model calls; this is the floor below
+        # which one cannot even start. Better to say so than to fail midway.
+        if remaining < 4000:
+            return False, (
+                "⛔ Sisa token harian tinggal "
+                f"{remaining:,}. Buka situs butuh beberapa panggilan model, jadi "
+                "aku tahan dulu biar tidak kebablasan.\n"
+                "Naikkan `DAILY_TOKEN_BUDGET` di `.env`, atau lanjut besok."
+            )
+        return True, ""
+
+    async def _record_browser_tokens(self, user_id: int, result) -> None:
+        """Bill the browser-use run to the same meter as everything else.
+
+        browser-use reports one total, not a prompt/completion split, so it is
+        booked as prompt tokens - the bulk of a browsing run is the page and
+        history being resent, which is input. Recording it at all is the point:
+        it was the only unrecorded spend in the system.
+        """
+        tokens = int(getattr(result, "tokens", 0) or 0)
+        if tokens <= 0 or self.budget is None or not user_id:
+            return
+        try:
+            await self.budget.record(user_id, "browser-use", tokens, 0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not record browser-use tokens: %s", exc)
+
+    def _browser_profile_dir(self, user_id: int) -> Path | None:
+        """The user's saved Chromium profile, so browser-use reuses their login.
+
+        Both engines point at the same directory on purpose: the user signs in
+        once, through either path, and the session is there for the next task.
+        """
+        profiles = getattr(self.browser, "profiles", None)
+        if profiles is None:
+            return None
+        try:
+            return profiles.profile_dir(user_id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _collect_download(self) -> tuple[list[str], str]:
         """Take the file the browser agent downloaded, if there is one.
@@ -694,7 +888,12 @@ class Orchestrator:
             },
         )
         text = shipped.summary()
-        if shipped.deployment is None:
+        if shipped.deployment is not None:
+            # The link is the deliverable. It used to live only in the URL field,
+            # which the chat layer never rendered, so the user got "website jadi"
+            # with no address to open. Put it in the text where it is read.
+            text += f"\n\n🔗 Buka di sini:\n{shipped.deployment.url}"
+        else:
             text += f"\n\nBelum ada kredensial deploy, jadi aku kasih bundle lokal:\n`{shipped.bundle}`"
         screenshots = []
         if shipped.final_report:
@@ -730,7 +929,17 @@ class Orchestrator:
             text += f"\n\nSudah diimport: {imported['url']} (aktif: {imported['active']})"
             location = imported["url"]
         except MissingSecretError:
-            text += "\n\n(n8n API key belum diisi, jadi aku simpan JSON-nya saja.)"
+            # n8n itself is running (it is started for you), it just has no API
+            # key yet, and only the owner can create one. Say exactly where to
+            # click instead of leaving the user with a JSON file and a shrug.
+            base = self.settings.n8n_base_url.rstrip("/")
+            text += (
+                "\n\nn8n sudah jalan, tapi aku belum bisa import otomatis "
+                "karena belum ada API key.\n"
+                f"Bikin sekali saja di sini: {base} → Settings → n8n API → Create API key, "
+                "lalu isi `N8N_API_KEY` di .env.\n"
+                "Sementara ini JSON workflow-nya aku lampirkan, tinggal di-import manual."
+            )
             location = str(path)
         except Exception as exc:  # noqa: BLE001
             text += f"\n\nImport otomatis gagal: {str(exc)[:150]}"

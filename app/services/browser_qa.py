@@ -37,17 +37,29 @@ class PageReport:
     status: int = 0
     title: str = ""
     text_length: int = 0
+    interactive_count: int = 0
     horizontal_overflow: bool = False
+    # Did the page actually take its styling from a stylesheet? A page whose
+    # classes resolve to browser defaults looks like plain black text on white -
+    # the "polosan" result the user kept getting. Measured, not guessed.
+    styled: bool = True
+    custom_properties: int = 0
 
     @property
     def ok(self) -> bool:
+        # A login or dashboard page is legitimately short on prose but full of
+        # controls. Counting only text flagged those pages as "empty" and sent
+        # the repair loop chasing a problem that did not exist. Any real
+        # interactive element counts as content too.
+        has_content = self.text_length > 200 or self.interactive_count >= 3
         return (
             self.status in range(200, 400)
             and not self.console_errors
             and not self.page_errors
             and not self.failed_requests
             and not self.horizontal_overflow
-            and self.text_length > 200
+            and has_content
+            and self.styled
         )
 
     def issues(self) -> list[str]:
@@ -59,8 +71,13 @@ class PageReport:
         problems += [f"request gagal: {e}" for e in self.failed_requests[:5]]
         if self.horizontal_overflow:
             problems.append("layout overflow horizontal (tidak responsif)")
-        if self.text_length <= 200:
+        if self.text_length <= 200 and self.interactive_count < 3:
             problems.append("konten halaman terlalu sedikit / kosong")
+        if not self.styled:
+            problems.append(
+                "halaman tidak ter-styling: stylesheet tidak berpengaruh, "
+                "tampil polosan tanpa warna"
+            )
         return problems
 
 
@@ -143,17 +160,26 @@ class BrowserQA:
         viewports: tuple[str, ...] = ("desktop", "mobile"),
         wait_ms: int = 1500,
         fill_forms: bool = False,
+        on_page=None,
     ) -> SiteReport:
         if not playwright_available():
             return SiteReport(url, error="Playwright belum terpasang (pip install playwright && playwright install chromium)")
         try:
-            return await self._run(url, viewports=viewports, wait_ms=wait_ms, fill_forms=fill_forms)
+            return await self._run(
+                url, viewports=viewports, wait_ms=wait_ms, fill_forms=fill_forms, on_page=on_page
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("browser QA failed: %s", exc)
             return SiteReport(url, error=str(exc)[:300])
 
     async def _run(
-        self, url: str, *, viewports: tuple[str, ...], wait_ms: int, fill_forms: bool
+        self,
+        url: str,
+        *,
+        viewports: tuple[str, ...],
+        wait_ms: int,
+        fill_forms: bool,
+        on_page=None,
     ) -> SiteReport:
         from playwright.async_api import async_playwright
 
@@ -201,10 +227,58 @@ class BrowserQA:
                         pass
 
                     try:
+                        page_report.interactive_count = int(
+                            await page.evaluate(
+                                "() => document.querySelectorAll("
+                                "'a[href], button, input, select, textarea').length"
+                            )
+                            or 0
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    try:
                         overflow = await page.evaluate(
                             "() => document.documentElement.scrollWidth > window.innerWidth + 4"
                         )
                         page_report.horizontal_overflow = bool(overflow)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    # Is the page actually styled? A stylesheet that loaded but
+                    # does not apply - or was never linked - leaves the browser's
+                    # default serif-on-white look. Two signals, both cheap and
+                    # both hard to fake: custom properties defined on :root (our
+                    # design system always defines many) and whether the body
+                    # still uses the browser's default font.
+                    try:
+                        measured = await page.evaluate(
+                            "() => {"
+                            "  const cs = getComputedStyle(document.body);"
+                            "  let props = 0;"
+                            "  for (const s of document.styleSheets) {"
+                            "    try { for (const r of s.cssRules) {"
+                            "      if (r.style && r.style.length) {"
+                            "        for (const p of r.style) if (p.startsWith('--')) props++;"
+                            "      }"
+                            "    } } catch (e) {}"
+                            "  }"
+                            "  return {"
+                            "    props: props,"
+                            "    font: cs.fontFamily || '',"
+                            "    bg: cs.backgroundColor || '',"
+                            "    links: document.querySelectorAll('link[rel=stylesheet]').length"
+                            "  };"
+                            "}"
+                        )
+                        props = int(measured.get("props") or 0)
+                        font = str(measured.get("font") or "")
+                        page_report.custom_properties = props
+                        # A page with no custom properties at all AND the browser
+                        # default font is unstyled. Requiring both avoids a false
+                        # alarm on a legitimately minimal page.
+                        defaultish = "serif" in font and "times" in font
+                        page_report.styled = not (props == 0 and defaultish)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -214,6 +288,19 @@ class BrowserQA:
                         page_report.screenshot = str(shot)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("screenshot failed: %s", exc)
+
+                    # A second, viewport-sized frame for the live feed. The
+                    # full-page shot above is the right artefact to keep, but as
+                    # a feed frame it is a tall sliver - the user saw "cuma
+                    # titik". A viewport frame is what the screen actually looks
+                    # like, so that is what gets posted.
+                    if on_page is not None:
+                        feed_shot = self.outputs / "qa" / f"{_slug(url)}-{name}-live.png"
+                        try:
+                            await page.screenshot(path=str(feed_shot), full_page=False)
+                            await on_page(page_report, name, str(feed_shot))
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("live frame failed: %s", exc)
 
                     report.pages.append(page_report)
                     await context.close()

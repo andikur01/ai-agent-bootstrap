@@ -47,3 +47,4 @@ cookies.txt
 youtube_token.json
 client_secret*.json
 *.sqlite3-journal
+.venv-browser/

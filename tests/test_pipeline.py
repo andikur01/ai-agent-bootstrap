@@ -261,3 +261,55 @@ def test_main_returns_clean_message_for_missing_secret(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert code == 3
     assert "Konfigurasi belum lengkap" in err
+
+
+# ---------------------------------------------------------------------------
+# The spending scope, through the real orchestrator path.
+#
+# The production bot ran with a CostGuard, and every chat died with
+# "'function' object has no attribute 'set'" because bind_task called .set on a
+# factory. The pipeline tests above pass cost_guard=None, so the broken line was
+# never reached. These run the same path the bot runs.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+async def orchestrator_with_cost_guard(tmp_path, settings):
+    from app.llm.cost_guard import CostGuard
+
+    store = Store(tmp_path / "cost.sqlite3")
+    embedder = build_embedder(settings)
+    vectors = build_vector_store(settings, store, embedder)
+    gateway = StubGateway(text="Jawaban uji dengan cost guard aktif, cukup panjang.")
+    memory = MemoryManager(store, vectors, ArtifactRegistry(store), settings, gateway=gateway)
+    cache = SemanticCache(store, embedder, enabled=False)
+    await cache.init()
+    guard = CostGuard(settings.daily_token_budget)
+    orch = Orchestrator(
+        settings=settings,
+        store=store,
+        gateway=gateway,
+        memory=memory,
+        cache=cache,
+        budget=BudgetGuard(store, settings.daily_token_budget),
+        cost_guard=guard,
+    )
+    orch.qa = None
+    yield orch
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_chat_task_runs_with_the_cost_guard_active(orchestrator_with_cost_guard):
+    """This is the exact call that crashed in production."""
+    outcome = await orchestrator_with_cost_guard.execute(
+        1, Route(Intent.CHAT, {"text": "halo apa kabar"})
+    )
+    assert outcome.text, "the chat must return an answer, not crash"
+
+
+@pytest.mark.asyncio
+async def test_the_spending_scope_is_released_after_a_task(orchestrator_with_cost_guard):
+    """A leaked binding would charge the next user's task to the previous one."""
+    from app.llm.gateway import _CURRENT_TASK
+
+    await orchestrator_with_cost_guard.execute(1, Route(Intent.CHAT, {"text": "halo"}))
+    assert _CURRENT_TASK.get() is None

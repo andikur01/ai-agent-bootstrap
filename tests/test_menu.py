@@ -85,11 +85,85 @@ def bot(settings, store):
 
 def test_menu_text_explains_what_the_agent_does():
     """The menu is an explanation, not a list of buttons to choose from."""
-    assert "Yang bisa aku kerjakan" in MENU_TEXT
+    assert "asisten pribadimu" in MENU_TEXT
     for topic in ("Website", "Otomasi", "Gambar", "Link"):
         assert topic in MENU_TEXT
     # It must tell the user they can just talk.
     assert "bahasa biasa" in MENU_TEXT
+
+
+def test_menu_explains_how_to_wake_the_bot_and_give_it_browser_access():
+    """The user asked for exactly these two things to be documented here."""
+    assert "/hidupkan" in MENU_TEXT
+    assert "/mode" in MENU_TEXT
+    assert "/akun" in MENU_TEXT
+    # And that the email-verification handoff is spelled out.
+    assert "verifikasi" in MENU_TEXT.lower()
+
+
+def test_menu_shows_the_exact_command_to_give_the_bot_an_account():
+    """The complaint was "jadi saya tetap kerepotan masukin situs, email, pw".
+
+    The fix is only real if the menu shows the literal command with an email and
+    a password in it, so the user can copy it instead of guessing the format.
+    """
+    assert "/akun <situs> <email> <password>" in MENU_TEXT
+    assert "emailku@gmail.com" in MENU_TEXT
+    # And it must say the password is not echoed back or logged.
+    assert "password" in MENU_TEXT.lower()
+    assert "hapus otomatis" in MENU_TEXT.lower()
+
+
+def test_menu_tells_the_user_they_can_watch_it_work_in_the_chat():
+    """Watching it work was requested as a live broadcast, not a link."""
+    assert "/siaran" in MENU_TEXT
+    # Honest about the Telegram limit, so the feature is not oversold.
+    assert "langsung" in MENU_TEXT.lower()
+    assert "/live" in MENU_TEXT
+
+
+def test_menu_lists_the_specialists():
+    """The roster is the point: work goes to the expert for that field."""
+    for name in ("Ahli Web", "Ahli Gambar", "Ahli Video", "Ahli Audio", "Ahli Riset"):
+        assert name in MENU_TEXT
+
+
+def test_menu_is_honest_about_token_spending():
+    assert "token" in MENU_TEXT.lower()
+    assert "batas" in MENU_TEXT.lower()
+
+
+@pytest.mark.asyncio
+async def test_hidupkan_switches_free_mode_on_and_off(bot, store):
+    """The user's own switch: 'hidupkan' means stop asking, start deciding."""
+    await store.upsert_user(111, "tester", "Tester")
+    update = FakeUpdate()
+
+    await bot.cmd_hidupkan(update, FakeContext())
+    assert (await store.get_prefs(111))["free_mode"] is True
+    assert "Mode bebas aktif" in update.effective_message.texts[-1]
+
+    await bot.cmd_hidupkan(update, FakeContext(["off"]))
+    assert (await store.get_prefs(111))["free_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_free_mode_skips_the_confirmation_gate(bot, store):
+    """With free mode on, a heavy task runs without the yes/no step."""
+    await store.upsert_user(111, "tester", "Tester")
+    await store.set_pref(111, "free_mode", True)
+    assert await bot._free_mode(111) is True
+
+    await store.set_pref(111, "free_mode", False)
+    assert await bot._free_mode(111) is False
+
+
+@pytest.mark.asyncio
+async def test_mode_command_reports_the_switch(bot, store):
+    await store.upsert_user(111, "tester", "Tester")
+    update = FakeUpdate()
+    await bot.cmd_mode(update, FakeContext())
+    assert "Bebas bertindak" in update.effective_message.texts[-1]
 
 
 def test_menu_keyboard_labels_cover_every_section():
