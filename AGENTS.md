@@ -217,3 +217,24 @@ a task is running and is free text. They are separate services for that reason.
 Route the reply in `on_message` before the confirmation gate, and only consume
 a message when someone is actually waiting - a slash command must still route,
 or a user who changes their mind is stuck answering a question forever.
+
+**A missing import is a dead bot, and only a running bot reveals it.** Two
+crashes reached the user because no test imports the module in the way the
+process does: `asyncio` was used in `application.py` without an import (killed
+startup), and `bind_task` called `.set` on `_TASK_BINDING`, which is a factory,
+not a `ContextVar` (killed every chat). Both were invisible to a green suite
+because the pipeline tests passed `cost_guard=None`, so the broken line never
+ran. Lesson: after wiring, start the real process and read its log, and give
+every production-only path at least one test that runs it. `deploy/run-forever.sh`
+caught the first one within 15 seconds - the watchdog is the reason the failure
+was visible instead of silent.
+
+**Telegram bots cannot stream video, so "watch it work" is a moving image, not
+a broadcast.** The honest implementation is a GIF that is edited in place every
+few seconds (`app/services/live_feed.py`), plus `/live` for full noVNC control.
+Editing needs a real `Bot` object; a plain `Message` double has none, so the
+feed falls back to posting a new tile instead of raising.
+
+**A preference written before the first message used to vanish.** `set_pref`
+ran an `UPDATE ... WHERE user_id = ?` that matched zero rows when the user had
+never been stored, so `/siaran off` silently did nothing. Insert the row first.

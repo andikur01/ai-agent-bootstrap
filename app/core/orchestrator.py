@@ -242,7 +242,12 @@ class Orchestrator:
         if self.cost_guard is not None:
             low, high = self.estimate_tokens(route)
             task = self.cost_guard.start_task(route.intent.value, estimate=high)
-            binding = self.gateway.bind_task(task)
+            # A gateway without a spending scope (a stub, or a custom one) must
+            # not crash the task - the guard is an optimisation, not a
+            # prerequisite.
+            bind = getattr(self.gateway, "bind_task", None)
+            if bind is not None:
+                binding = bind(task)
         try:
             if binding is not None:
                 binding.__enter__()

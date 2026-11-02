@@ -174,7 +174,12 @@ class Store:
         )
 
     async def set_pref(self, user_id: int, key: str, value: Any) -> None:
-        user = await self.get_user(user_id) or {"prefs": "{}"}
+        # The row may not exist yet: prefs can be set before the first message is
+        # stored (a command like /siaran off is enough). The old UPDATE matched
+        # zero rows and the preference vanished silently.
+        user = await self.get_user(user_id)
+        if user is None:
+            user = await self.upsert_user(user_id)
         prefs = json.loads(user.get("prefs") or "{}")
         prefs[key] = value
         await run_blocking(

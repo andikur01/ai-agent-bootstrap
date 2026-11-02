@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     live_view_port: int = 12001
     # Headless server? /login runs the browser under xvfb and sends screenshots.
     browser_headful: bool = True
+    # Post the agent's screen into the chat as a moving tile while it works.
+    live_feed_enabled: bool = True
+    # Seconds between feed updates. Under ~4s the GIFs overlap on a slow link.
+    live_feed_interval: float = 6.0
 
     # ---------- Search ----------
     tavily_api_key: str = ""

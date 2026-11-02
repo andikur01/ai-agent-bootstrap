@@ -15,7 +15,12 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaAnimation,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
@@ -139,7 +144,10 @@ HELP_EXTRA = (
     "Kirim link langsung - YouTube, TikTok, IG, artikel\n"
     "Kirim voice note - Langsung ditranskrip\n\n"
     "🖥️ *BROWSER & KEY*\n\n"
-    "(live view menyala otomatis di tugas panjang, tidak perlu perintah)\n"
+    "(siaran layar nyala otomatis di tugas panjang - kamu lihat aku kerja "
+    "di chat ini, layarnya bergerak sendiri)\n"
+    "`/siaran` - Nyalakan/matikan siaran layar di chat\n"
+    "`/live` - Link layar penuh, bisa kamu klik & ketik sendiri\n"
     "`/login` <url> - Login sekali ke situs provider\n"
     "`/keys` - Status key pool\n"
     "`/keys auto` <provider> - Ambil key otomatis\n"
@@ -284,6 +292,19 @@ MENU_TEXT = (
     "Aku tidak bisa buka emailmu sendiri, jadi kalau situs minta kode, aku akan\n"
     "berhenti dan minta kode itu ke kamu di chat. Kamu kirim kodenya, aku\n"
     "lanjutkan sendiri dari titik itu - tidak perlu mulai dari awal.\n\n"
+
+    "*🎥 Nonton aku kerja (langsung di chat ini)*\n"
+    "Waktu aku mengerjakan tugas berat (bikin web, buka situs, bikin video),\n"
+    "layar kerjaku aku siarkan ke chat ini - gambar bergerak yang berubah terus,\n"
+    "bukan link yang harus kamu klik. Kamu lihat sendiri kursor dan halamannya\n"
+    "bergerak.\n"
+    "`/siaran` - cek status siaran\n"
+    "`/siaran off` - matikan (hemat kuota)\n"
+    "`/siaran on` - nyalakan lagi\n"
+    "`/live` - kalau kamu mau IKUT klik & ketik sendiri di layar itu\n"
+    "_Jujur ya: Telegram melarang bot siaran video langsung. Jadi ini feed\n"
+    "gambar bergerak yang aku perbarui tiap beberapa detik - paling dekat yang\n"
+    "bisa aku lakukan, dan hasilnya kamu lihat sendiri di chat._\n\n"
 
     "*🌐 Website*\n"
     "Situs statis (landing page, portofolio, toko) dan web fullstack dengan\n"
@@ -795,7 +816,17 @@ class TelegramBot:
             ),
         ) if show_progress else None
 
+        # Live feed: the user asked to *watch* the work, not read a percentage.
+        # A Telegram bot cannot stream video, so the frames the agent already
+        # takes are posted as a moving tile that updates itself. Only for the
+        # intents that produce screenshots - a feed for a chat reply is noise.
+        feed = None
+        if show_progress and route.intent in _WATCHABLE_INTENTS:
+            feed = await self._make_live_feed(message, user_id)
+
         async def progress(percent: int, note: str, *, screenshot: str = "") -> None:
+            if feed is not None and screenshot:
+                feed.push(screenshot)
             if reporter is not None:
                 await reporter.update(percent, note, screenshot=screenshot)
 
@@ -805,6 +836,8 @@ class TelegramBot:
                 # Remember where to reach this user while the task runs, so a
                 # mid-task question (a verification code) lands in this chat.
                 self._active_chat[user_id] = message.chat_id
+                if feed is not None:
+                    await feed.start()
                 try:
                     outcome = await self.orch.execute(
                         user_id,
@@ -817,6 +850,8 @@ class TelegramBot:
                     )
                 finally:
                     self._active_chat.pop(user_id, None)
+                    if feed is not None:
+                        await feed.stop()
             await self.store.update_task(task_id, "done", outcome.text[:500])
 
             # Milestone screenshots first: evidence before the summary.
@@ -863,6 +898,54 @@ class TelegramBot:
             await self.store.log_error(route.intent.value, f"{type(exc).__name__}: {exc}", user_id)
             log.exception("task crashed intent=%s", route.intent.value)
             await send_text(message, "❌ Ada error tak terduga. Sudah aku catat di log.")
+
+    async def _make_live_feed(self, message, user_id: int):
+        """Build a screen feed for this chat, or None when it is switched off.
+
+        The feed is on by default because the user asked to watch the work, but
+        it costs bandwidth and a message per few seconds, so `/siaran off` has
+        to be able to turn it off without touching the config.
+        """
+        if not getattr(self.settings, "live_feed_enabled", True):
+            return None
+        prefs = await self.store.get_prefs(user_id)
+        if prefs.get("live_feed", "on") == "off":
+            return None
+
+        from app.services.live_feed import LiveFeed
+
+        return LiveFeed(
+            send_animation=lambda path, caption: message.reply_animation(
+                Path(path).open("rb"), caption=caption
+            ),
+            edit_animation=self._edit_feed_animation(message),
+            outputs_dir=self.settings.outputs_path,
+            interval=float(getattr(self.settings, "live_feed_interval", 6.0)),
+        )
+
+    def _edit_feed_animation(self, message):
+        """Update the existing feed message in place, if the bot can.
+
+        Telegram cannot edit media on an arbitrary message, so this needs a real
+        ``Bot``. When there is none (tests, or a plain Message double) the feed
+        simply posts a new tile instead of failing.
+        """
+        bot = getattr(message, "get_bot", None)
+        if bot is None:
+            return None
+        try:
+            bot = message.get_bot()
+        except Exception:  # noqa: BLE001 - a fake message has no bot
+            return None
+
+        async def _edit(message_id, path, caption):
+            await bot.edit_message_media(
+                chat_id=message.chat_id,
+                message_id=message_id,
+                media=InputMediaAnimation(Path(path).open("rb"), caption=caption),
+            )
+
+        return _edit
 
     def _capacity_hint(self) -> str:
         """Tell the user where to get a key when every provider is exhausted.
@@ -1160,6 +1243,53 @@ class TelegramBot:
             "kamu ambil alih di layar itu.\n\n"
             "Catatan: siapa pun yang punya link + password ini bisa mengendalikan "
             "browser. Jangan dibagikan.",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_siaran(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Turn the in-chat screen feed on or off.
+
+        The feed posts a moving picture of the agent's screen while it works.
+        It is on by default because the user asked to watch the work happen, but
+        on a metered phone connection a GIF every few seconds is real money, so
+        it has to be switchable from the chat.
+        """
+        user_id = update.effective_user.id
+        self._authorise(user_id)
+
+        args = [a.lower() for a in (context.args or [])]
+        if args and args[0] in ("off", "mati", "stop"):
+            await self.store.set_pref(user_id, "live_feed", "off")
+            await update.message.reply_text(
+                "📴 Siaran layar dimatikan.\n\n"
+                "Aku tetap kirim progress persen dan screenshot penting saja.\n"
+                "Nyalakan lagi: `/siaran on`",
+                parse_mode="Markdown",
+            )
+            return
+        if args and args[0] in ("on", "hidup", "nyala"):
+            await self.store.set_pref(user_id, "live_feed", "on")
+            await update.message.reply_text(
+                "🔴 Siaran layar dinyalakan.\n\n"
+                "Mulai sekarang, saat aku kerja kamu lihat layarnya bergerak "
+                "sendiri di chat ini - bukan link.",
+                parse_mode="Markdown",
+            )
+            return
+
+        prefs = await self.store.get_prefs(user_id)
+        current = "nyala 🔴" if prefs.get("live_feed", "on") != "off" else "mati 📴"
+        await update.message.reply_text(
+            "*Siaran layar*\n\n"
+            f"Sekarang: {current}\n\n"
+            "Ini yang bikin kamu bisa *lihat* aku kerja di dalam chat - "
+            "layarnya bergerak sendiri, bukan cuma tulisan persen.\n\n"
+            "`/siaran on` - nyalakan\n"
+            "`/siaran off` - matikan (hemat kuota)\n\n"
+            "_Catatan jujur: Telegram tidak mengizinkan bot untuk siaran video "
+            "langsung. Jadi ini feed gambar bergerak yang aku perbarui terus, "
+            "yang paling dekat dengan 'nonton langsung'. Kalau mau kontrol "
+            "penuh (ketik captcha sendiri), pakai `/live`._",
             parse_mode="Markdown",
         )
 

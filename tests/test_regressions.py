@@ -819,7 +819,10 @@ def test_menu_explains_and_help_lists_the_commands():
     # live view is automatic now, so it is not advertised as a command
     for command in ("/login", "/keys"):
         assert command in HELP_TEXT
-    assert "live view menyala otomatis" in HELP_TEXT
+    # The screen feed is the "watch it work in the chat" feature; it is
+    # automatic, and /siaran is how the user turns it off again.
+    assert "siaran layar nyala otomatis" in HELP_TEXT
+    assert "/siaran" in HELP_TEXT
 
 
 def test_watchable_intents_use_enum_members():

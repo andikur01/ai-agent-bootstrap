@@ -101,6 +101,27 @@ def test_menu_explains_how_to_wake_the_bot_and_give_it_browser_access():
     assert "verifikasi" in MENU_TEXT.lower()
 
 
+def test_menu_shows_the_exact_command_to_give_the_bot_an_account():
+    """The complaint was "jadi saya tetap kerepotan masukin situs, email, pw".
+
+    The fix is only real if the menu shows the literal command with an email and
+    a password in it, so the user can copy it instead of guessing the format.
+    """
+    assert "/akun <situs> <email> <password>" in MENU_TEXT
+    assert "emailku@gmail.com" in MENU_TEXT
+    # And it must say the password is not echoed back or logged.
+    assert "password" in MENU_TEXT.lower()
+    assert "hapus otomatis" in MENU_TEXT.lower()
+
+
+def test_menu_tells_the_user_they_can_watch_it_work_in_the_chat():
+    """Watching it work was requested as a live broadcast, not a link."""
+    assert "/siaran" in MENU_TEXT
+    # Honest about the Telegram limit, so the feature is not oversold.
+    assert "langsung" in MENU_TEXT.lower()
+    assert "/live" in MENU_TEXT
+
+
 def test_menu_lists_the_specialists():
     """The roster is the point: work goes to the expert for that field."""
     for name in ("Ahli Web", "Ahli Gambar", "Ahli Video", "Ahli Audio", "Ahli Riset"):

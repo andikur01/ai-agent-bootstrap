@@ -188,8 +188,13 @@ class LLMGateway:
         return _CURRENT_TASK.get()
 
     def bind_task(self, task):
-        """Charge every call inside this block to ``task``."""
-        return _TASK_BINDING.set(task)
+        """Charge every call inside this block to ``task``.
+
+        Returns the context manager itself: ``_TASK_BINDING`` builds one, it is
+        not a ContextVar, so calling ``.set`` on it crashed every chat with
+        "'function' object has no attribute 'set'".
+        """
+        return _TASK_BINDING(self, task)
 
     def candidates(self, tier: str) -> list[tuple[str, str]]:
         models = TIER_MODELS.get(tier, TIER_MODELS["small"])

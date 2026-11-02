@@ -6,7 +6,10 @@ stubbed gateway and no Telegram connection.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
+import time
 from typing import Any
 
 from app.bot.handlers import TelegramBot
@@ -40,9 +43,11 @@ class Application:
     scheduler: SchedulerService
     bot: TelegramBot
     telegram_app: Any = None
+    _heartbeat_task: Any = None
 
     async def start(self) -> None:
         await self.scheduler.start()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         if self.telegram_app is not None:
             await self.telegram_app.initialize()
             await self._publish_commands()
@@ -98,6 +103,7 @@ class Application:
             BotCommand("keys", "Key pool: status, add, auto, sumber"),
             BotCommand("login", "Login sekali ke situs provider"),
             BotCommand("live", "Lihat & kendalikan layar browser AI"),
+            BotCommand("siaran", "Siaran layar di chat: on/off"),
             BotCommand("buat_gambar", "Generate gambar"),
             BotCommand("edit_gambar", "Edit gambar terakhir"),
             BotCommand("buat_video", "Buat video"),
@@ -118,7 +124,27 @@ class Application:
         except Exception as exc:  # noqa: BLE001 - cosmetic, must never block startup
             log.warning("set_my_commands failed: %s", exc)
 
+    async def _heartbeat_loop(self) -> None:
+        """Prove the bot is alive, and die loudly when it is not.
+
+        A restart-on-crash supervisor cannot see a *hung* process: the PID is
+        still there, so nothing restarts and the user gets silence. Touching a
+        heartbeat file, and exiting when the event loop stops running, turns
+        both a crash and a freeze into something the supervisor can fix.
+        """
+        path = Path(getattr(self.settings, "data_path", Path("data"))) / "bot.heartbeat"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        interval = 30
+        while True:
+            try:
+                path.write_text(str(int(time.time())))
+            except Exception as exc:  # noqa: BLE001 - never kill the bot over this
+                log.debug("heartbeat write failed: %s", exc)
+            await asyncio.sleep(interval)
+
     async def stop(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
         await self.scheduler.shutdown()
         if self.telegram_app is not None:
             try:
@@ -336,6 +362,7 @@ def _build_telegram_app(settings: Settings, bot: TelegramBot):
     app.add_handler(CommandHandler("akun", bot.cmd_akun))
     app.add_handler(CommandHandler("login", bot.cmd_login))
     app.add_handler(CommandHandler("live", bot.cmd_live))
+    app.add_handler(CommandHandler("siaran", bot.cmd_siaran))
     app.add_handler(CommandHandler("buat_n8n", bot.cmd_buat_n8n))
     app.add_handler(CommandHandler("ingat", bot.cmd_ingat))
     app.add_handler(CommandHandler("baca_link", bot.cmd_baca_link))

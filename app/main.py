@@ -2,12 +2,41 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import os
 import signal
 import sys
+from pathlib import Path
 
 from app.application import build_app
 from app.core.config import get_settings
 from app.core.logging_setup import get_logger, setup_logging
+
+
+def _take_single_instance_lock(settings) -> "os._wrap_close | None":
+    """Refuse to start when another copy of the bot already owns the token.
+
+    Two processes polling the same Telegram token do not both work - they
+    cancel each other out with ``Conflict: terminated by other getUpdates
+    request``, and the user sees a bot that receives messages and answers
+    none. That is exactly what happened here, so the second copy now exits
+    with a clear reason instead of fighting the first one.
+
+    ``flock`` is used rather than a pid file because the kernel drops the lock
+    the moment the process dies, including on a crash or an OOM kill, so a
+    stale lock can never block a legitimate restart.
+    """
+    path = Path(getattr(settings, "data_path", Path("data"))) / "bot.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w")  # noqa: SIM115 - held for the life of the process
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
 
 
 async def run() -> int:
@@ -24,6 +53,14 @@ async def run() -> int:
             "allow-list diisi (fail-closed)."
         )
         return 2
+
+    lock = _take_single_instance_lock(settings)
+    if lock is None:
+        log.error(
+            "Bot lain sudah jalan dengan token ini. Dua bot tidak bisa jalan "
+            "bersama - Telegram hanya mengizinkan satu. Matikan yang lama dulu."
+        )
+        return 4
 
     app = await build_app(settings)
     stop_event = asyncio.Event()
